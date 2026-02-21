@@ -7,7 +7,6 @@ Deploys unique OpenClaw instances linked to SVM wallet public keys.
 import os
 import json
 import uuid
-import subprocess
 import hashlib
 import time
 import secrets
@@ -17,6 +16,9 @@ try:
     import markdown
 except ImportError:
     markdown = None
+
+import docker
+from docker.errors import DockerException, NotFound, APIError
 
 app = Flask(__name__, template_folder="templates", static_folder="static")
 
@@ -30,6 +32,19 @@ DB_FILE = DATA_DIR / "instances.json"
 OPENCLAW_IMAGE = "openclaw:local"
 BASE_PORT = 19000  # Instances get ports 19000+
 MAX_INSTANCES = 20  # Safety limit for this NUC
+
+# Docker client (lazy init)
+_docker_client = None
+
+def docker_client():
+    global _docker_client
+    if _docker_client is None:
+        _docker_client = docker.from_env()
+    return _docker_client
+
+
+def docker_unreachable_error() -> dict:
+    return {"error": "Docker daemon is unreachable. Is the Docker service running?"}
 
 def load_db():
     if DB_FILE.exists():
@@ -55,30 +70,51 @@ def container_name(instance_id: str) -> str:
 
 def get_container_status(name: str) -> str:
     try:
-        result = subprocess.run(
-            ["docker", "inspect", "--format", "{{.State.Status}}", name],
-            capture_output=True, text=True, timeout=5
-        )
-        if result.returncode == 0:
-            return result.stdout.strip()
-    except:
-        pass
-    return "not_found"
+        client = docker_client()
+        container = client.containers.get(name)
+        return container.status or "unknown"
+    except NotFound:
+        return "not_found"
+    except DockerException:
+        return "docker_unreachable"
+
 
 def get_container_stats(name: str) -> dict:
     """Get CPU/memory stats for a running container."""
     try:
-        result = subprocess.run(
-            ["docker", "stats", "--no-stream", "--format",
-             '{"cpu":"{{.CPUPerc}}","mem":"{{.MemUsage}}","mem_pct":"{{.MemPerc}}"}',
-             name],
-            capture_output=True, text=True, timeout=10
-        )
-        if result.returncode == 0 and result.stdout.strip():
-            return json.loads(result.stdout.strip())
-    except:
-        pass
-    return {}
+        client = docker_client()
+        container = client.containers.get(name)
+        stats = container.stats(stream=False)
+
+        cpu_stats = stats.get("cpu_stats", {})
+        precpu_stats = stats.get("precpu_stats", {})
+        cpu_delta = cpu_stats.get("cpu_usage", {}).get("total_usage", 0) - precpu_stats.get("cpu_usage", {}).get("total_usage", 0)
+        system_delta = cpu_stats.get("system_cpu_usage", 0) - precpu_stats.get("system_cpu_usage", 0)
+        cpu_count = len(cpu_stats.get("cpu_usage", {}).get("percpu_usage", []) or []) or 1
+        cpu_percent = 0.0
+        if system_delta > 0 and cpu_delta > 0:
+            cpu_percent = (cpu_delta / system_delta) * cpu_count * 100.0
+
+        mem_usage = stats.get("memory_stats", {}).get("usage", 0)
+        mem_limit = stats.get("memory_stats", {}).get("limit", 0)
+        mem_percent = (mem_usage / mem_limit * 100.0) if mem_limit else 0.0
+
+        def format_bytes(num):
+            for unit in ["B", "KiB", "MiB", "GiB", "TiB"]:
+                if num < 1024.0:
+                    return f"{num:.1f}{unit}"
+                num /= 1024.0
+            return f"{num:.1f}PiB"
+
+        return {
+            "cpu": f"{cpu_percent:.2f}%",
+            "mem": f"{format_bytes(mem_usage)} / {format_bytes(mem_limit)}",
+            "mem_pct": f"{mem_percent:.2f}%"
+        }
+    except NotFound:
+        return {}
+    except DockerException:
+        return {"error": "docker_unreachable"}
 
 
 @app.route("/")
@@ -136,18 +172,27 @@ def launch_instance():
         existing = db["instances"][iid]
         cname = container_name(iid)
         status = get_container_status(cname)
+        if status == "docker_unreachable":
+            return jsonify(docker_unreachable_error()), 503
         if status == "running":
             return jsonify({
                 "error": "Instance already running",
                 "instance": {**existing, "id": iid, "status": status}
             }), 409
         # Exists but stopped — restart it
-        subprocess.run(["docker", "start", cname], capture_output=True, timeout=15)
-        time.sleep(2)
-        existing["status"] = get_container_status(cname)
-        existing["last_started"] = int(time.time())
-        save_db(db)
-        return jsonify({"instance": {**existing, "id": iid}})
+        try:
+            client = docker_client()
+            container = client.containers.get(cname)
+            container.start()
+            time.sleep(2)
+            existing["status"] = get_container_status(cname)
+            existing["last_started"] = int(time.time())
+            save_db(db)
+            return jsonify({"instance": {**existing, "id": iid}})
+        except NotFound:
+            return jsonify({"error": "Container not found"}), 404
+        except DockerException:
+            return jsonify(docker_unreachable_error()), 503
 
     if len(db["instances"]) >= MAX_INSTANCES:
         return jsonify({"error": f"Maximum {MAX_INSTANCES} instances reached"}), 429
@@ -193,25 +238,30 @@ def launch_instance():
     cname = container_name(iid)
 
     # Launch container
-    cmd = [
-        "docker", "run", "-d",
-        "--name", cname,
-        "--restart", "unless-stopped",
-        "--init",
-        "-e", "HOME=/home/node",
-        "-e", "TERM=xterm-256color",
-        "-e", f"OPENCLAW_GATEWAY_TOKEN={gateway_token}",
-        "-v", f"{config_dir}:/home/node/.openclaw",
-        "-v", f"{workspace_dir}:/home/node/.openclaw/workspace",
-        "-p", f"{port}:18789",
-        OPENCLAW_IMAGE,
-        "node", "dist/index.js", "gateway",
-        "--bind", "lan", "--port", "18789"
-    ]
-
-    result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
-    if result.returncode != 0:
-        return jsonify({"error": f"Docker launch failed: {result.stderr[:500]}"}), 500
+    try:
+        client = docker_client()
+        container = client.containers.run(
+            image=OPENCLAW_IMAGE,
+            name=cname,
+            detach=True,
+            restart_policy={"Name": "unless-stopped"},
+            init=True,
+            environment={
+                "HOME": "/home/node",
+                "TERM": "xterm-256color",
+                "OPENCLAW_GATEWAY_TOKEN": gateway_token
+            },
+            volumes={
+                str(config_dir): {"bind": "/home/node/.openclaw", "mode": "rw"},
+                str(workspace_dir): {"bind": "/home/node/.openclaw/workspace", "mode": "rw"}
+            },
+            ports={"18789/tcp": port},
+            command=["node", "dist/index.js", "gateway", "--bind", "lan", "--port", "18789"]
+        )
+    except APIError as e:
+        return jsonify({"error": f"Docker launch failed: {str(e)[:500]}"}), 500
+    except DockerException:
+        return jsonify(docker_unreachable_error()), 503
 
     instance_data = {
         "pubkey": pubkey,
@@ -219,7 +269,7 @@ def launch_instance():
         "gateway_token": gateway_token,
         "created": int(time.time()),
         "last_started": int(time.time()),
-        "container_id": result.stdout.strip()[:12]
+        "container_id": container.id[:12]
     }
     db["instances"][iid] = instance_data
     save_db(db)
@@ -237,9 +287,14 @@ def stop_instance():
     iid = wallet_to_id(pubkey)
     cname = container_name(iid)
 
-    result = subprocess.run(["docker", "stop", cname], capture_output=True, text=True, timeout=30)
-    if result.returncode != 0:
+    try:
+        client = docker_client()
+        container = client.containers.get(cname)
+        container.stop(timeout=30)
+    except NotFound:
         return jsonify({"error": "Container not found or already stopped"}), 404
+    except DockerException:
+        return jsonify(docker_unreachable_error()), 503
 
     return jsonify({"status": "stopped", "id": iid})
 
@@ -255,8 +310,18 @@ def destroy_instance():
     iid = wallet_to_id(pubkey)
     cname = container_name(iid)
 
-    subprocess.run(["docker", "stop", cname], capture_output=True, timeout=15)
-    subprocess.run(["docker", "rm", "-f", cname], capture_output=True, timeout=15)
+    try:
+        client = docker_client()
+        container = client.containers.get(cname)
+        try:
+            container.stop(timeout=15)
+        except APIError:
+            pass
+        container.remove(force=True)
+    except NotFound:
+        pass
+    except DockerException:
+        return jsonify(docker_unreachable_error()), 503
 
     if iid in db["instances"]:
         del db["instances"][iid]
@@ -269,6 +334,8 @@ def destroy_instance():
 def instance_stats(instance_id):
     cname = container_name(instance_id)
     status = get_container_status(cname)
+    if status == "docker_unreachable":
+        return jsonify(docker_unreachable_error()), 503
     stats = get_container_stats(cname) if status == "running" else {}
     return jsonify({"status": status, "stats": stats})
 
@@ -278,13 +345,15 @@ def instance_logs(instance_id):
     cname = container_name(instance_id)
     lines = request.args.get("lines", "50")
     try:
-        result = subprocess.run(
-            ["docker", "logs", "--tail", lines, cname],
-            capture_output=True, text=True, timeout=10
-        )
-        return jsonify({"logs": result.stdout[-5000:] + result.stderr[-2000:]})
-    except:
-        return jsonify({"logs": "Failed to fetch logs"}), 500
+        client = docker_client()
+        container = client.containers.get(cname)
+        logs = container.logs(tail=int(lines))
+        text = logs.decode("utf-8", errors="replace")
+        return jsonify({"logs": text[-5000:]})
+    except NotFound:
+        return jsonify({"logs": "Container not found"}), 404
+    except DockerException:
+        return jsonify({"logs": "Docker daemon is unreachable"}), 503
 
 
 if __name__ == "__main__":
