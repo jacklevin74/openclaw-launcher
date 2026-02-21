@@ -2,6 +2,9 @@
 
 **Wallet-Linked Docker Orchestrator for X1 Validator AI Agents**
 
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![GitHub](https://img.shields.io/badge/GitHub-jacklevin74%2Fopenclaw--launcher-blue)](https://github.com/jacklevin74/openclaw-launcher)
+
 Deploy isolated OpenClaw instances tied to SVM wallet public keys. Each validator gets their own personal AI agent with dedicated resources, configuration, and workspace.
 
 ---
@@ -64,6 +67,19 @@ X1 validators can spin up their own AI agent without manual OpenClaw setup. Your
 
 ## For Operators
 
+### Installation
+
+**Clone the repository:**
+```bash
+git clone https://github.com/jacklevin74/openclaw-launcher.git
+cd openclaw-launcher
+```
+
+**Install dependencies:**
+```bash
+pip3 install -r requirements.txt
+```
+
 ### Prerequisites
 
 **System Requirements:**
@@ -72,11 +88,6 @@ X1 validators can spin up their own AI agent without manual OpenClaw setup. Your
 - Python 3.8+
 - 32GB+ RAM recommended for multiple instances
 - 500GB+ storage
-
-**Python Dependencies:**
-```bash
-pip3 install flask markdown
-```
 
 **Docker Image:**
 Build OpenClaw image first:
