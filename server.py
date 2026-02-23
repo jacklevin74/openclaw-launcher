@@ -10,6 +10,7 @@ import uuid
 import hashlib
 import time
 import secrets
+import shutil
 from pathlib import Path
 from flask import Flask, render_template, request, jsonify, send_from_directory
 try:

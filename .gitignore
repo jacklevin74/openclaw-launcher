@@ -2,6 +2,8 @@
 __pycache__/
 *.py[cod]
 *$py.class
+*.pyc
+*.pyo
 *.so
 .Python
 env/
@@ -14,6 +16,7 @@ data/
 # Logs
 *.log
 logs/
+launcher.log
 
 # Environment
 .env

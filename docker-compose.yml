@@ -1,0 +1,13 @@
+version: '3.8'
+services:
+  launcher:
+    build: .
+    restart: unless-stopped
+    ports:
+      - "8780:8780"
+    volumes:
+      - ./data:/app/data
+      - /var/run/docker.sock:/var/run/docker.sock
+    env_file:
+      - .env
+    command: ["./start.sh"]
