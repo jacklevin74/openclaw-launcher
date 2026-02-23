@@ -224,7 +224,7 @@ def launch_instance():
                 "token": gateway_token
             },
             "controlUi": {
-                "allowInsecureAuth": true
+                "allowInsecureAuth": True
             }
         }
     }
@@ -237,6 +237,9 @@ def launch_instance():
 
     cname = container_name(iid)
 
+    # Tailscale IP — bind ports here so instances are only reachable via Tailscale
+    TAILSCALE_IP = "100.118.141.107"
+
     # Launch container
     try:
         client = docker_client()
@@ -246,6 +249,11 @@ def launch_instance():
             detach=True,
             restart_policy={"Name": "unless-stopped"},
             init=True,
+            # Drop all capabilities, add only what openclaw needs
+            cap_drop=["ALL"],
+            cap_add=["NET_BIND_SERVICE"],
+            # Prevent privilege escalation via SUID/SGID binaries
+            security_opt=["no-new-privileges"],
             environment={
                 "HOME": "/home/node",
                 "TERM": "xterm-256color",
@@ -255,7 +263,8 @@ def launch_instance():
                 str(config_dir): {"bind": "/home/node/.openclaw", "mode": "rw"},
                 str(workspace_dir): {"bind": "/home/node/.openclaw/workspace", "mode": "rw"}
             },
-            ports={"18789/tcp": port},
+            # Bind only to Tailscale IP — not reachable from LAN
+            ports={"18789/tcp": (TAILSCALE_IP, port)},
             command=["node", "dist/index.js", "gateway", "--bind", "lan", "--port", "18789"]
         )
     except APIError as e:
