@@ -207,6 +207,18 @@ def launch_instance():
     config_dir.mkdir(parents=True, exist_ok=True)
     workspace_dir.mkdir(parents=True, exist_ok=True)
 
+    # Seed workspace from templates/workspace/ if it exists
+    try:
+        tmpl_dir = BASE_DIR / "templates" / "workspace"
+        if tmpl_dir.exists():
+            for src in tmpl_dir.iterdir():
+                if src.is_file():
+                    dest = workspace_dir / src.name
+                    if not dest.exists():  # don't overwrite on restart
+                        shutil.copy2(src, dest)
+    except Exception:
+        pass  # never break a deploy over missing templates
+
     # Write minimal openclaw config
     oc_config = {
         "agents": {
@@ -266,6 +278,10 @@ def launch_instance():
             },
             # Bind only to Tailscale IP — not reachable from LAN
             ports={"18789/tcp": (TAILSCALE_IP, port)},
+            # Resource limits per instance
+            mem_limit="512m",
+            memswap_limit="512m",
+            nano_cpus=500_000_000,  # 0.5 CPU
             command=["node", "dist/index.js", "gateway", "--bind", "lan", "--port", "18789"]
         )
     except APIError as e:
@@ -364,6 +380,54 @@ def instance_logs(instance_id):
         return jsonify({"logs": "Container not found"}), 404
     except DockerException:
         return jsonify({"logs": "Docker daemon is unreachable"}), 503
+
+
+def _safe_filename(filename: str) -> bool:
+    """Allow only .md/.json filenames with no path traversal."""
+    return (
+        filename.endswith((".md", ".json"))
+        and "/" not in filename
+        and ".." not in filename
+        and len(filename) <= 64
+    )
+
+
+@app.route("/api/files/<iid>", methods=["GET"])
+def list_files(iid):
+    db = load_db()
+    if iid not in db["instances"]:
+        return jsonify({"error": "Instance not found"}), 404
+    workspace = INSTANCES_DIR / iid / "workspace"
+    files = sorted(p.name for p in workspace.glob("*.md")) if workspace.exists() else []
+    return jsonify({"files": files})
+
+
+@app.route("/api/files/<iid>/<filename>", methods=["GET"])
+def read_file(iid, filename):
+    if not _safe_filename(filename):
+        return jsonify({"error": "Invalid filename"}), 400
+    db = load_db()
+    if iid not in db["instances"]:
+        return jsonify({"error": "Instance not found"}), 404
+    path = INSTANCES_DIR / iid / "workspace" / filename
+    if not path.exists():
+        return jsonify({"content": "", "filename": filename, "exists": False})
+    return jsonify({"content": path.read_text(errors="replace"), "filename": filename, "exists": True})
+
+
+@app.route("/api/files/<iid>/<filename>", methods=["PUT"])
+def write_file(iid, filename):
+    if not _safe_filename(filename):
+        return jsonify({"error": "Invalid filename"}), 400
+    db = load_db()
+    if iid not in db["instances"]:
+        return jsonify({"error": "Instance not found"}), 404
+    data = request.json or {}
+    content = data.get("content", "")
+    path = INSTANCES_DIR / iid / "workspace" / filename
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(content)
+    return jsonify({"ok": True})
 
 
 if __name__ == "__main__":
