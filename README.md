@@ -97,6 +97,14 @@ docker build -t openclaw:local /path/to/openclaw
 
 ### Running the Launcher
 
+**Create a `.env` file** (required for auth):
+```bash
+# .env
+LAUNCHER_TOKEN=your-secret-token-here    # Required for API auth
+TAILSCALE_IP=100.118.141.107             # Optional, auto-detected if omitted
+PORT=8780                                # Optional, default 8780
+```
+
 **Start server:**
 ```bash
 cd /home/jack/.openclaw/workspace/openclaw-launcher
@@ -104,14 +112,22 @@ python3 server.py
 ```
 
 **Default port:** 8780  
-**Access:** `http://localhost:8780`
+**Access:** `http://localhost:8780/?token=your-secret-token-here`
 
-**Background mode:**
+**Background mode (via gunicorn):**
 ```bash
-nohup python3 server.py > launcher.log 2>&1 &
+./start.sh
 ```
 
 ### Configuration
+
+**Environment variables:**
+
+| Variable | Required | Default | Description |
+|----------|----------|---------|-------------|
+| `LAUNCHER_TOKEN` | **Yes** | *(none)* | Bearer token for API auth. If unset, API is unauthenticated. |
+| `TAILSCALE_IP` | No | `100.118.141.107` | IP to bind instance ports to |
+| `PORT` | No | `8780` | Launcher UI port |
 
 **Edit `server.py` constants:**
 
@@ -252,16 +268,38 @@ The gateway token in instance details is masked in the web UI (shown as `••�
 
 ## API Reference
 
+### Authentication
+
+All `/api/*` endpoints require authentication when `LAUNCHER_TOKEN` is set:
+
+```bash
+# Header auth (recommended)
+curl -H "Authorization: Bearer <LAUNCHER_TOKEN>" http://localhost:8780/api/instances
+
+# Query param auth (for browser/UI)
+curl http://localhost:8780/api/instances?token=<LAUNCHER_TOKEN>
+```
+
+Returns `401 Unauthorized` if token is missing or invalid.
+
 ### Endpoints
 
 **`GET /`**  
-Web UI (main dashboard)
+Web UI (main dashboard) — no auth required
 
 **`GET /docs`**  
-Rendered README documentation (HTML)
+Rendered README documentation (HTML) — no auth required
+
+**`GET /health`**  
+Health check — no auth required
+
+**Response:**
+```json
+{ "ok": true, "instances": 3 }
+```
 
 **`GET /api/instances`**  
-List all instances with live Docker status
+List all instances with live Docker status. **Note:** `gateway_token` is never included in this response.
 
 **Response:**
 ```json
@@ -353,16 +391,6 @@ Live CPU and memory stats for a running container
 }
 ```
 
-**`GET /api/logs/[INSTANCE_ID]?lines=50`**  
-Fetch recent container log output
-
-**Response:**
-```json
-{
-  "logs": "[2026-02-21 03:49:12] Gateway listening on port 18789\n..."
-}
-```
-
 **`GET /api/files/[INSTANCE_ID]`**  
 List workspace `.md` files for an instance
 
@@ -384,7 +412,7 @@ Read a workspace file (`.md` or `.json` only, no path traversal)
 ```
 
 **`PUT /api/files/[INSTANCE_ID]/[filename]`**  
-Write/update a workspace file
+Update an existing workspace file (edit-only — cannot create new files)
 
 **Request:**
 ```json
@@ -394,6 +422,18 @@ Write/update a workspace file
 **Response:**
 ```json
 { "ok": true }
+```
+
+Returns `403 Forbidden` if the file doesn't already exist.
+
+**`GET /api/logs/[INSTANCE_ID]?lines=50`**  
+Fetch recent container log output. `lines` is capped at 500.
+
+**Response:**
+```json
+{
+  "logs": "[2026-02-21 03:49:12] Gateway listening on port 18789\n..."
+}
 ```
 
 ---
@@ -473,7 +513,7 @@ MAX_INSTANCES = 50  # Or whatever your hardware supports
 
 **Check active instances:**
 ```bash
-curl http://localhost:8780/api/instances | jq '.instances | length'
+curl -H "Authorization: Bearer $LAUNCHER_TOKEN" http://localhost:8780/api/instances | jq '.instances | length'
 ```
 
 ### Database corruption
@@ -530,33 +570,61 @@ Edit `instances.json`, change port, restart container with new mapping.
 
 ---
 
-## Security Considerations
+## Security
+
+### Launcher Authentication
+
+The launcher API is protected by a bearer token set via the `LAUNCHER_TOKEN` environment variable.
+
+**How it works:**
+- All `/api/*` routes require authentication when `LAUNCHER_TOKEN` is set
+- Token can be provided as:
+  - `Authorization: Bearer <token>` header (recommended for scripts/API)
+  - `?token=<token>` query parameter (used by the web UI)
+- `/`, `/docs`, `/health`, and static files are public (no sensitive data)
+- Token comparison uses `secrets.compare_digest()` (timing-safe)
+
+**If `LAUNCHER_TOKEN` is not set, the API is unauthenticated** — only acceptable behind Tailscale or a VPN.
+
+```bash
+# API call with auth
+curl -H "Authorization: Bearer your-token" http://localhost:8780/api/instances
+
+# Web UI access
+http://localhost:8780/?token=your-token
+```
 
 ### Gateway Tokens
 
-Each instance has a **unique 48-char hex token** for authentication.
+Each instance has a **unique 48-char hex token** for OpenClaw gateway authentication.
 
-**Access control:**
-- Tokens stored in `instances.json` (protect this file)
-- Tokens passed via URL parameter: `?token=...`
-- No session management — token is the credential
+**Token lifecycle:**
+- Generated on first deploy (`secrets.token_hex(24)`)
+- **Returned only once** — in the `/api/launch` response
+- **Never returned** by `/api/instances` (stripped from response)
+- Stored in `instances.json` on disk
+- Visible in web UI via "Reveal" toggle (frontend only, not in API)
 
 **Recommendations:**
-- **Don't share tokens** — they grant full agent access
-- **Rotate tokens** by redeploying instance
-- **Protect instances.json** — contains all tokens
+- **Copy your token immediately** on first deploy — it won't be shown again via API
+- **Protect `instances.json`** — it contains all gateway tokens on disk
+- **Rotate tokens** by destroying and redeploying the instance
+
+### Database Concurrency
+
+`instances.json` is protected by exclusive file locking (`fcntl.flock`) to prevent race conditions under concurrent requests (gunicorn with multiple workers). All write operations (launch, destroy) acquire the lock before read→modify→write.
 
 ### Network Exposure
 
 **Current setup:**
 - Launcher UI: port 8780 (Tailscale only)
-- Instances: ports 19000+ bound to Tailscale IP only (`100.x.x.x`)
+- Instances: ports 19000+ bound to Tailscale IP only (configurable via `TAILSCALE_IP` env var)
 - **Not reachable from LAN or internet** — Tailscale access required
 
 **Production recommendations:**
+- Set `LAUNCHER_TOKEN` — never run without auth on a shared network
 - Keep Tailscale binding (default) for maximum isolation
 - Add HTTPS reverse proxy (nginx/Caddy) if exposing publicly
-- Rate limiting on `/api/launch` to prevent abuse
 - Firewall rule: deny 19000-19020 from non-Tailscale interfaces
 
 ### Container Isolation
@@ -581,8 +649,9 @@ A kernel exploit or Docker daemon vulnerability could affect other containers. L
 
 The file editor API (`/api/files/`) enforces strict access controls:
 - **Whitelist extensions:** `.md` and `.json` only
-- **No path traversal:** `/` and `..` are rejected
+- **No path traversal:** `/`, `\`, and `..` are rejected
 - **Max filename length:** 64 chars
+- **Edit-only:** can only write to files that already exist (no new file creation via API)
 - **Instance scoped:** each request is validated against `instances.json` before filesystem access
 
 ---
@@ -649,12 +718,16 @@ docker container prune -f --filter "name=openclaw-"
 ### Local Testing
 
 ```bash
-# Run without Docker (for UI dev)
+# Run without auth (dev only)
 python3 server.py
+
+# Run with auth
+LAUNCHER_TOKEN=dev-secret python3 server.py
 
 # Test with mock instances
 curl -X POST http://localhost:8780/api/launch \
   -H "Content-Type: application/json" \
+  -H "Authorization: Bearer dev-secret" \
   -d '{"pubkey":"test123abc456"}'
 ```
 
