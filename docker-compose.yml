@@ -10,4 +10,3 @@ services:
       - /var/run/docker.sock:/var/run/docker.sock
     env_file:
       - .env
-    command: ["./start.sh"]

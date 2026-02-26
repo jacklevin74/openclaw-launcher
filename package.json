@@ -1,0 +1,39 @@
+{
+  "name": "openclaw-launcher",
+  "version": "1.0.0",
+  "description": "**Wallet-Linked Docker Orchestrator for X1 Validator AI Agents**",
+  "main": "index.js",
+  "scripts": {
+    "dev": "tsx src/server.ts",
+    "build": "tsc",
+    "start": "node dist/server.js"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/jacklevin74/openclaw-launcher.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "bugs": {
+    "url": "https://github.com/jacklevin74/openclaw-launcher/issues"
+  },
+  "homepage": "https://github.com/jacklevin74/openclaw-launcher#readme",
+  "dependencies": {
+    "dockerode": "^4.0.9",
+    "express": "^5.2.1",
+    "marked": "^17.0.3",
+    "proper-lockfile": "^4.1.2",
+    "ws": "^8.19.0"
+  },
+  "devDependencies": {
+    "@types/dockerode": "^4.0.1",
+    "@types/express": "^5.0.6",
+    "@types/node": "^25.3.1",
+    "@types/proper-lockfile": "^4.1.4",
+    "@types/ws": "^8.18.1",
+    "tsx": "^4.21.0",
+    "typescript": "^5.9.3"
+  }
+}
