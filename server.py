@@ -11,18 +11,33 @@ import hashlib
 import time
 import secrets
 import shutil
+import threading
+import logging
 from contextlib import contextmanager
 from pathlib import Path
-from flask import Flask, render_template, request, jsonify, send_from_directory
+from flask import Flask, render_template, request, jsonify, send_from_directory, Response
 try:
     import markdown
 except ImportError:
     markdown = None
 
+try:
+    from flask_sock import Sock
+    _HAS_FLASK_SOCK = True
+except ImportError:
+    _HAS_FLASK_SOCK = False
+
 import docker
 from docker.errors import DockerException, NotFound, APIError
 
+log = logging.getLogger(__name__)
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+
 app = Flask(__name__, template_folder="templates", static_folder="static")
+
+# WebSocket support via flask-sock (optional but strongly recommended)
+if _HAS_FLASK_SOCK:
+    sock = Sock(app)
 
 BASE_DIR = Path(__file__).parent
 DATA_DIR = BASE_DIR / "data"
@@ -41,6 +56,20 @@ TAILSCALE_IP = os.environ.get("TAILSCALE_IP", "100.118.141.107")
 # Auth token — if set, all /api/ routes require Authorization: Bearer <token>
 LAUNCHER_TOKEN = os.environ.get("LAUNCHER_TOKEN", "")
 
+# ---------------------------------------------------------------------------
+# Health reconciler state
+# ---------------------------------------------------------------------------
+
+# Global status cache: {instance_id: {"status": str, "cpu_percent": float, "memory_bytes": int, "updated": float}}
+_instance_status_cache: dict = {}
+_cache_lock = threading.Lock()
+
+# Restart counter per instance (persists in memory for the lifetime of the process)
+_restart_counters: dict = {}   # {instance_id: int}
+
+_reconciler_started = False
+_reconciler_lock = threading.Lock()
+
 # Docker client (lazy init)
 _docker_client = None
 
@@ -53,6 +82,128 @@ def docker_client():
 
 def docker_unreachable_error() -> dict:
     return {"error": "Docker daemon is unreachable. Is the Docker service running?"}
+
+
+# ---------------------------------------------------------------------------
+# Health reconciler background thread
+# ---------------------------------------------------------------------------
+
+def _reconcile_once():
+    """Single reconciliation pass — update status cache for all DB instances."""
+    db = load_db()
+    instances = db.get("instances", {})
+
+    try:
+        client = docker_client()
+    except DockerException:
+        log.warning("Health reconciler: Docker unreachable, skipping pass")
+        return
+
+    with _cache_lock:
+        current_ids = set(instances.keys())
+        # Remove stale entries
+        for stale in set(_instance_status_cache.keys()) - current_ids:
+            del _instance_status_cache[stale]
+
+    for iid in instances:
+        cname = container_name(iid)
+        try:
+            container = client.containers.get(cname)
+            new_status = container.status or "unknown"
+
+            # Detect unexpected stop (was running, now dead)
+            with _cache_lock:
+                prev = _instance_status_cache.get(iid, {})
+                prev_status = prev.get("status", "unknown")
+
+            if prev_status == "running" and new_status in ("exited", "dead", "removing"):
+                log.warning(
+                    "Health reconciler: instance %s container %s transitioned %s → %s",
+                    iid, cname, prev_status, new_status
+                )
+                with _cache_lock:
+                    _restart_counters[iid] = _restart_counters.get(iid, 0) + 1
+
+            # Collect per-instance CPU / memory from Docker stats
+            cpu_percent = 0.0
+            memory_bytes = 0
+            if new_status == "running":
+                try:
+                    stats = container.stats(stream=False)
+                    cpu_stats = stats.get("cpu_stats", {})
+                    precpu_stats = stats.get("precpu_stats", {})
+                    cpu_delta = (
+                        cpu_stats.get("cpu_usage", {}).get("total_usage", 0)
+                        - precpu_stats.get("cpu_usage", {}).get("total_usage", 0)
+                    )
+                    system_delta = cpu_stats.get("system_cpu_usage", 0) - precpu_stats.get("system_cpu_usage", 0)
+                    cpu_count = len(cpu_stats.get("cpu_usage", {}).get("percpu_usage", []) or []) or 1
+                    if system_delta > 0 and cpu_delta > 0:
+                        cpu_percent = (cpu_delta / system_delta) * cpu_count * 100.0
+                    memory_bytes = stats.get("memory_stats", {}).get("usage", 0)
+                except Exception:
+                    pass
+
+            with _cache_lock:
+                _instance_status_cache[iid] = {
+                    "status": new_status,
+                    "cpu_percent": cpu_percent,
+                    "memory_bytes": memory_bytes,
+                    "updated": time.time(),
+                }
+
+        except NotFound:
+            with _cache_lock:
+                prev_status = _instance_status_cache.get(iid, {}).get("status", "unknown")
+                if prev_status not in ("not_found", "unknown"):
+                    log.warning(
+                        "Health reconciler: container %s for instance %s is gone (was %s)",
+                        cname, iid, prev_status
+                    )
+                _instance_status_cache[iid] = {
+                    "status": "not_found",
+                    "cpu_percent": 0.0,
+                    "memory_bytes": 0,
+                    "updated": time.time(),
+                }
+        except DockerException as e:
+            log.error("Health reconciler: DockerException for %s: %s", iid, e)
+
+
+def _reconciler_loop():
+    """Background thread: runs _reconcile_once() every 60 seconds."""
+    log.info("Health reconciler thread started")
+    while True:
+        try:
+            _reconcile_once()
+        except Exception as e:
+            log.error("Health reconciler unhandled error: %s", e)
+        time.sleep(60)
+
+
+def start_reconciler():
+    """Start the health reconciler thread exactly once."""
+    global _reconciler_started
+    with _reconciler_lock:
+        if _reconciler_started:
+            return
+        _reconciler_started = True
+    t = threading.Thread(target=_reconciler_loop, name="health-reconciler", daemon=True)
+    t.start()
+    log.info("Health reconciler started (daemon thread)")
+
+
+# Register as Flask app startup hook so gunicorn also starts it
+try:
+    # Flask >= 2.2
+    @app.before_request
+    def _ensure_reconciler():
+        # Only fire once per process; check_auth runs after this so we must
+        # not block or raise.  We call it here rather than with_appcontext so
+        # it works regardless of how the WSGI server manages threads.
+        start_reconciler()
+except Exception:
+    pass
 
 
 # ---------------------------------------------------------------------------
@@ -132,6 +283,7 @@ def container_name(instance_id: str) -> str:
     return f"openclaw-{instance_id}"
 
 def get_container_status(name: str) -> str:
+    """Check live container status (used for write paths; reads prefer the cache)."""
     try:
         client = docker_client()
         container = client.containers.get(name)
@@ -140,6 +292,16 @@ def get_container_status(name: str) -> str:
         return "not_found"
     except DockerException:
         return "docker_unreachable"
+
+
+def cached_status(instance_id: str) -> str:
+    """Return status from the reconciler cache, falling back to a live check."""
+    with _cache_lock:
+        entry = _instance_status_cache.get(instance_id)
+    if entry:
+        return entry["status"]
+    # Cache not populated yet — live check
+    return get_container_status(container_name(instance_id))
 
 
 def get_container_stats(name: str) -> dict:
@@ -216,16 +378,82 @@ def health():
 
 
 # ---------------------------------------------------------------------------
+# Routes — Prometheus /metrics
+# ---------------------------------------------------------------------------
+
+@app.route("/metrics")
+def metrics():
+    """Prometheus-format metrics endpoint (text/plain; version=0.0.4)."""
+    db = load_db()
+    instances = db.get("instances", {})
+    total = len(instances)
+
+    running_count = 0
+    lines = []
+
+    # Header comments + gauges
+    lines.append("# HELP openclaw_instances_total Total number of instances in the database")
+    lines.append("# TYPE openclaw_instances_total gauge")
+    lines.append(f"openclaw_instances_total {total}")
+
+    lines.append("# HELP openclaw_instances_running Number of currently running containers")
+    lines.append("# TYPE openclaw_instances_running gauge")
+
+    lines.append("# HELP openclaw_instance_restarts_total Restart counter per instance")
+    lines.append("# TYPE openclaw_instance_restarts_total counter")
+
+    lines.append("# HELP openclaw_instance_cpu_percent CPU usage percent per instance")
+    lines.append("# TYPE openclaw_instance_cpu_percent gauge")
+
+    lines.append("# HELP openclaw_instance_memory_bytes Memory usage in bytes per instance")
+    lines.append("# TYPE openclaw_instance_memory_bytes gauge")
+
+    restart_lines = []
+    cpu_lines = []
+    mem_lines = []
+
+    for iid, inst in instances.items():
+        label = f'instance="{iid}",pubkey="{inst.get("pubkey","unknown")}"'
+
+        with _cache_lock:
+            cache_entry = _instance_status_cache.get(iid, {})
+            restarts = _restart_counters.get(iid, 0)
+
+        status = cache_entry.get("status", "unknown")
+        if status == "running":
+            running_count += 1
+
+        cpu_pct = cache_entry.get("cpu_percent", 0.0)
+        mem_bytes = cache_entry.get("memory_bytes", 0)
+
+        restart_lines.append(f"openclaw_instance_restarts_total{{{label}}} {restarts}")
+        cpu_lines.append(f"openclaw_instance_cpu_percent{{{label}}} {cpu_pct:.4f}")
+        mem_lines.append(f"openclaw_instance_memory_bytes{{{label}}} {mem_bytes}")
+
+    # Insert running count now that we've computed it
+    lines.append(f"openclaw_instances_running {running_count}")
+
+    lines.extend(restart_lines)
+    lines.extend(cpu_lines)
+    lines.extend(mem_lines)
+    lines.append("")  # trailing newline
+
+    body = "\n".join(lines)
+    return Response(body, mimetype="text/plain; version=0.0.4; charset=utf-8")
+
+
+# ---------------------------------------------------------------------------
 # Routes — API
 # ---------------------------------------------------------------------------
 
 @app.route("/api/instances", methods=["GET"])
 def list_instances():
+    """List all instances, using the reconciler cache for status (fast path)."""
     db = load_db()
     instances = []
     for iid, inst in db["instances"].items():
-        cname = container_name(iid)
-        status = get_container_status(cname)
+        # Use cached status — avoids a Docker API call per instance on every poll
+        status = cached_status(iid)
         # Return a copy without gateway_token (sensitive credential)
         safe = {k: v for k, v in inst.items() if k != "gateway_token"}
         safe["status"] = status
@@ -263,8 +491,12 @@ def launch_instance():
                 container = client.containers.get(cname)
                 container.start()
                 time.sleep(2)
-                existing["status"] = get_container_status(cname)
+                new_status = get_container_status(cname)
+                existing["status"] = new_status
                 existing["last_started"] = int(time.time())
+                # Invalidate cache so next poll reflects new state
+                with _cache_lock:
+                    _instance_status_cache.pop(iid, None)
                 # Return full data including gateway_token on (re)launch
                 return jsonify({"instance": {**existing, "id": iid}})
             except NotFound:
@@ -336,6 +568,10 @@ def launch_instance():
                 detach=True,
                 restart_policy={"Name": "unless-stopped"},
                 init=True,
+                # Read-only root filesystem; workspace & config are rw bind mounts
+                read_only=True,
+                # /tmp must be writable for OpenClaw runtime scratch space
+                tmpfs={"/tmp": "size=64m"},
                 # Drop all capabilities, add only what openclaw needs
                 cap_drop=["ALL"],
                 cap_add=["NET_BIND_SERVICE"],
@@ -373,6 +609,15 @@ def launch_instance():
         }
         db["instances"][iid] = instance_data
 
+    # Seed cache immediately so first poll is instant
+    with _cache_lock:
+        _instance_status_cache[iid] = {
+            "status": "starting",
+            "cpu_percent": 0.0,
+            "memory_bytes": 0,
+            "updated": time.time(),
+        }
+
     # gateway_token IS returned on launch so the caller can configure the dashboard link
     return jsonify({"instance": {**instance_data, "id": iid, "status": "starting"}})
 
@@ -391,6 +636,8 @@ def stop_instance():
         client = docker_client()
         container = client.containers.get(cname)
         container.stop(timeout=30)
+        with _cache_lock:
+            _instance_status_cache.pop(iid, None)
     except NotFound:
         return jsonify({"error": "Container not found or already stopped"}), 404
     except DockerException:
@@ -426,6 +673,10 @@ def destroy_instance():
         if iid in db["instances"]:
             del db["instances"][iid]
 
+    with _cache_lock:
+        _instance_status_cache.pop(iid, None)
+        _restart_counters.pop(iid, None)
+
     return jsonify({"status": "destroyed", "id": iid})
 
 
@@ -439,8 +690,13 @@ def instance_stats(instance_id):
     return jsonify({"status": status, "stats": stats})
 
 
+# ---------------------------------------------------------------------------
+# Logs — HTTP (backward-compatible) + WebSocket streaming
+# ---------------------------------------------------------------------------
+
 @app.route("/api/logs/<instance_id>", methods=["GET"])
 def instance_logs(instance_id):
+    """HTTP GET: fetch recent logs (tail). Kept for backward compatibility."""
     cname = container_name(instance_id)
     try:
         lines = int(request.args.get("lines", "50"))
@@ -458,6 +714,71 @@ def instance_logs(instance_id):
     except DockerException:
         return jsonify({"logs": "Docker daemon is unreachable"}), 503
 
+
+if _HAS_FLASK_SOCK:
+    @sock.route("/api/logs/<instance_id>/stream")
+    def stream_logs(ws, instance_id):
+        """WebSocket endpoint: tail then follow container logs in real-time.
+
+        Client connects → receives last 50 lines immediately → then live output
+        until connection closes or container stops.
+        """
+        cname = container_name(instance_id)
+        try:
+            client = docker_client()
+            container = client.containers.get(cname)
+        except NotFound:
+            try:
+                ws.send("[error] Container not found\n")
+            except Exception:
+                pass
+            return
+        except DockerException:
+            try:
+                ws.send("[error] Docker daemon unreachable\n")
+            except Exception:
+                pass
+            return
+
+        try:
+            log_stream = container.logs(stream=True, follow=True, tail=50)
+            for chunk in log_stream:
+                if isinstance(chunk, bytes):
+                    chunk = chunk.decode("utf-8", errors="replace")
+                # Each chunk may contain multiple lines
+                ws.send(chunk)
+        except Exception:
+            # Connection closed by client or container stopped — both are normal
+            pass
+else:
+    # Graceful fallback: plain HTTP SSE if flask-sock isn't installed
+    @app.route("/api/logs/<instance_id>/stream")
+    def stream_logs_sse(instance_id):
+        """SSE fallback when flask-sock is unavailable."""
+        cname = container_name(instance_id)
+
+        def generate():
+            try:
+                client = docker_client()
+                container = client.containers.get(cname)
+                log_stream = container.logs(stream=True, follow=True, tail=50)
+                for chunk in log_stream:
+                    if isinstance(chunk, bytes):
+                        chunk = chunk.decode("utf-8", errors="replace")
+                    for line in chunk.splitlines():
+                        yield f"data: {line}\n\n"
+            except NotFound:
+                yield "data: [error] Container not found\n\n"
+            except DockerException:
+                yield "data: [error] Docker daemon unreachable\n\n"
+
+        return Response(generate(), mimetype="text/event-stream",
+                        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+
+
+# ---------------------------------------------------------------------------
+# File API
+# ---------------------------------------------------------------------------
 
 def _safe_filename(filename: str) -> bool:
     """Allow only .md/.json filenames with no path traversal."""
@@ -510,5 +831,11 @@ def write_file(iid, filename):
     return jsonify({"ok": True})
 
 
+# ---------------------------------------------------------------------------
+# Entry point
+# ---------------------------------------------------------------------------
+
 if __name__ == "__main__":
+    # Start the health reconciler immediately when running directly
+    start_reconciler()
     app.run(host="0.0.0.0", port=8780, debug=False)

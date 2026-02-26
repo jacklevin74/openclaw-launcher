@@ -599,22 +599,110 @@ async function relaunch(pubkey) {
   } catch (e) { toast("Failed", "error"); }
 }
 
+let _activeLogWs = null;
+
+function _closeActiveLogWs() {
+  if (_activeLogWs) {
+    try { _activeLogWs.close(); } catch(_) {}
+    _activeLogWs = null;
+  }
+}
+
 async function viewLogs(instanceId) {
-  try {
-    const res = await apiFetch(`${HOST}/api/logs/${instanceId}?lines=100`);
-    const data = await res.json();
-    const modal = document.getElementById("modal-container");
-    modal.innerHTML = `
-      <div class="logs-modal" onclick="if(event.target===this)this.remove()">
-        <div class="logs-content">
-          <div class="logs-header">
-            <span>Logs — ${instanceId}</span>
-            <button class="btn-sm" onclick="this.closest('.logs-modal').remove()">Close</button>
+  _closeActiveLogWs();
+
+  const modal = document.getElementById("modal-container");
+  modal.innerHTML = `
+    <div class="logs-modal" id="logs-modal-overlay" onclick="if(event.target===this){closeLogsModal();}">
+      <div class="logs-content">
+        <div class="logs-header">
+          <span>Logs — ${instanceId} <span id="logs-ws-status" style="font-size:11px;color:var(--muted);font-weight:400;margin-left:8px">⏳ connecting…</span></span>
+          <div style="display:flex;gap:8px;align-items:center">
+            <label style="font-size:12px;color:var(--muted);display:flex;align-items:center;gap:4px;cursor:pointer">
+              <input type="checkbox" id="logs-autoscroll" checked style="cursor:pointer"> auto-scroll
+            </label>
+            <button class="btn-sm" onclick="closeLogsModal()">Close</button>
           </div>
-          <div class="logs-body">${escHtml(data.logs || "No logs")}</div>
         </div>
-      </div>`;
-  } catch (e) { toast("Failed to fetch logs", "error"); }
+        <div class="logs-body" id="logs-body-content">Connecting to log stream…</div>
+      </div>
+    </div>`;
+
+  const wsProto = location.protocol === "https:" ? "wss:" : "ws:";
+  const wsUrl = `${wsProto}//${location.host}/api/logs/${instanceId}/stream`;
+  const body = document.getElementById("logs-body-content");
+  const statusEl = document.getElementById("logs-ws-status");
+  const autoScrollCb = document.getElementById("logs-autoscroll");
+
+  function appendLog(text) {
+    if (!body) return;
+    // First chunk replaces placeholder
+    if (body.textContent === "Connecting to log stream…") body.textContent = "";
+    body.textContent += text;
+    if (autoScrollCb && autoScrollCb.checked) {
+      body.scrollTop = body.scrollHeight;
+    }
+  }
+
+  // Try WebSocket first
+  let usedWs = false;
+  try {
+    const ws = new WebSocket(wsUrl + (_urlToken ? `?token=${encodeURIComponent(_urlToken)}` : ""));
+    _activeLogWs = ws;
+    usedWs = true;
+
+    ws.onopen = () => {
+      if (statusEl) statusEl.textContent = "🟢 live";
+    };
+    ws.onmessage = (e) => {
+      appendLog(e.data);
+    };
+    ws.onerror = () => {
+      // Fallback to HTTP poll on WebSocket failure
+      if (statusEl) statusEl.textContent = "⚠️ WS unavailable — HTTP mode";
+      _fallbackHttpLogs(instanceId, body, statusEl);
+    };
+    ws.onclose = () => {
+      if (statusEl && statusEl.textContent.startsWith("🟢")) {
+        statusEl.textContent = "🔴 disconnected";
+      }
+    };
+  } catch (e) {
+    usedWs = false;
+  }
+
+  if (!usedWs) {
+    if (statusEl) statusEl.textContent = "📄 HTTP mode";
+    _fallbackHttpLogs(instanceId, body, statusEl);
+  }
+}
+
+async function _fallbackHttpLogs(instanceId, body, statusEl) {
+  // Simple HTTP poll fallback — fetches last 100 lines every 3 seconds
+  async function poll() {
+    try {
+      const res = await apiFetch(`${HOST}/api/logs/${instanceId}?lines=100`);
+      const data = await res.json();
+      if (body) body.textContent = data.logs || "No logs";
+      const autoScrollCb = document.getElementById("logs-autoscroll");
+      if (body && autoScrollCb && autoScrollCb.checked) body.scrollTop = body.scrollHeight;
+    } catch(_) {}
+  }
+  await poll();
+  // Keep polling every 3s while modal is visible
+  const pollId = setInterval(() => {
+    if (!document.getElementById("logs-modal-overlay")) {
+      clearInterval(pollId);
+      return;
+    }
+    poll();
+  }, 3000);
+}
+
+function closeLogsModal() {
+  _closeActiveLogWs();
+  const el = document.getElementById("logs-modal-overlay");
+  if (el) el.remove();
 }
 
 function escHtml(s) {
