@@ -13,13 +13,18 @@ Deploy isolated OpenClaw instances tied to SVM wallet public keys. Each validato
 
 **What it does:**
 - Deploys unique OpenClaw instances per wallet address
-- Each instance runs in isolated Docker container
+- Each instance runs in an isolated, hardened Docker container
 - Automatic resource management (CPU, memory, ports)
 - Web UI for deployment and monitoring
+- Real-time log streaming via WebSocket
+- Prometheus metrics endpoint
+- Health reconciler with automatic state tracking
 - Maximum 20 concurrent instances (configurable)
 
 **Use case:**
 X1 validators can spin up their own AI agent without manual OpenClaw setup. Your wallet is your identity — deploy once, access anywhere.
+
+**Stack:** TypeScript, Express, WebSocket (ws), Dockerode, Node.js 24
 
 ---
 
@@ -27,150 +32,126 @@ X1 validators can spin up their own AI agent without manual OpenClaw setup. Your
 
 ### How to Deploy Your Agent
 
-1. **Visit the launcher:**  
-   `http://jack-nucbox-m6-ultra.tail515dc.ts.net:8780/`  
+1. **Visit the launcher:**
+   `http://jack-nucbox-m6-ultra.tail515dc.ts.net:8780/`
    *(Click "📖 Docs" in the header to view this guide)*
 
-2. **Enter your X1/Solana wallet public key**  
+2. **Enter your X1/Solana wallet public key**
    Example: `aVuLr2twoecnZGWqHFVtRtPM6W5iwSPfHRr9cpp9mMf`
 
-3. **Click "Deploy"**  
+3. **Click "Deploy"**
    - System creates a unique instance ID (hash of your pubkey)
    - Spins up Docker container
    - Assigns dedicated port (19000+)
    - Generates gateway auth token
 
-4. **Access your agent:**  
+4. **Access your agent:**
    - **URL:** `http://jack-nucbox-m6-ultra.tail515dc.ts.net:[PORT]/`
    - **Token:** Shown in instance details
    - **Web UI:** `http://...[PORT]/?token=[YOUR_TOKEN]`
 
 ### Instance Management
 
-**Start/Stop:**  
 - Use the web UI to start/stop your instance
 - Stopped instances preserve all data (workspace, config, memory)
 - Restart anytime with same wallet address
-
-**Resource Limits:**
-- **CPU:** Shared across all instances
-- **Memory:** Monitored per-container
-- **Storage:** Isolated workspace per instance
-- **Max instances:** 20 total on this host
+- Live logs via WebSocket streaming in the UI
 
 **Your Data:**
-- **Workspace:** `/data/instances/[INSTANCE_ID]/workspace/`
-- **Config:** `/data/instances/[INSTANCE_ID]/config/`
+- **Workspace:** `data/instances/[INSTANCE_ID]/workspace/`
+- **Config:** `data/instances/[INSTANCE_ID]/config/`
 - **Persistent:** Survives container restarts
 
 ---
 
 ## For Operators
 
-### Installation
-
-**Clone the repository:**
-```bash
-git clone https://github.com/jacklevin74/openclaw-launcher.git
-cd openclaw-launcher
-```
-
-**Install dependencies:**
-```bash
-pip3 install -r requirements.txt
-```
-
 ### Prerequisites
 
-**System Requirements:**
 - Linux host (tested on Ubuntu)
 - Docker installed and running
-- Python 3.8+
+- Node.js 20+ (24 recommended)
 - 32GB+ RAM recommended for multiple instances
 - 500GB+ storage
 
-**Docker Image:**
-Build OpenClaw image first:
+### Installation
+
+```bash
+git clone https://github.com/jacklevin74/openclaw-launcher.git
+cd openclaw-launcher
+npm install
+```
+
+**Build the OpenClaw Docker image first:**
 ```bash
 docker build -t openclaw:local /path/to/openclaw
 ```
 
-### Running the Launcher
+### Configuration
 
-**Create a `.env` file** (required for auth):
+Create a `.env` file:
 ```bash
-# .env
 LAUNCHER_TOKEN=your-secret-token-here    # Required for API auth
-TAILSCALE_IP=100.118.141.107             # Optional, auto-detected if omitted
+TAILSCALE_IP=100.118.141.107             # Optional, default shown
 PORT=8780                                # Optional, default 8780
 ```
 
-**Start server:**
-```bash
-cd /home/jack/.openclaw/workspace/openclaw-launcher
-python3 server.py
+**Constants** (edit `src/server.ts`):
+```typescript
+const BASE_PORT = 19000;        // First instance port
+const MAX_INSTANCES = 20;       // Safety limit
 ```
 
-**Default port:** 8780  
+**Image name** (edit `src/docker.ts`):
+```typescript
+export const OPENCLAW_IMAGE = "openclaw:local";
+```
+
+### Running
+
+**Development:**
+```bash
+npm run dev
+```
+
+**Production:**
+```bash
+npm run build
+npm start
+```
+
+**With Docker Compose:**
+```bash
+docker compose up -d
+```
+
 **Access:** `http://localhost:8780/?token=your-secret-token-here`
-
-**Background mode (via gunicorn):**
-```bash
-./start.sh
-```
-
-### Configuration
-
-**Environment variables:**
-
-| Variable | Required | Default | Description |
-|----------|----------|---------|-------------|
-| `LAUNCHER_TOKEN` | **Yes** | *(none)* | Bearer token for API auth. If unset, API is unauthenticated. |
-| `TAILSCALE_IP` | No | `100.118.141.107` | IP to bind instance ports to |
-| `PORT` | No | `8780` | Launcher UI port |
-
-**Edit `server.py` constants:**
-
-```python
-BASE_PORT = 19000          # First instance port
-MAX_INSTANCES = 20         # Safety limit
-OPENCLAW_IMAGE = "openclaw:local"  # Docker image name
-```
-
-**Port allocation:**
-- **Launcher UI:** 8780
-- **Instance 1:** 19000
-- **Instance 2:** 19001
-- **Instance N:** 19000 + (N-1)
-
-### Database
-
-**Location:** `data/instances.json`
-
-**Structure:**
-```json
-{
-  "instances": {
-    "60839bdbe7f2": {
-      "pubkey": "aVuLr2twoecnZGWqHFVtRtPM6W5iwSPfHRr9cpp9mMf",
-      "port": 19000,
-      "gateway_token": "abc123...",
-      "created_at": 1708473600,
-      "last_started": 1708473600,
-      "status": "running"
-    }
-  }
-}
-```
-
-**Backup:**
-```bash
-cp data/instances.json data/instances.json.backup
-```
 
 ---
 
 ## Architecture
+
+### Project Structure
+
+```
+openclaw-launcher/
+├── src/
+│   ├── server.ts       # Express app, routes, WebSocket setup
+│   ├── auth.ts         # Bearer token middleware + WS auth
+│   ├── db.ts           # File-locked JSON database
+│   ├── docker.ts       # Container lifecycle (launch, stop, destroy, logs, stats)
+│   ├── reconciler.ts   # Health reconciler (60s interval)
+│   └── metrics.ts      # Prometheus metrics formatter
+├── public/
+│   ├── index.html      # Frontend SPA (dark cyberpunk theme)
+│   └── docs.html       # Documentation page template
+├── templates/
+│   └── workspace/      # Seed files for new instances
+├── package.json
+├── tsconfig.json
+├── Dockerfile
+└── docker-compose.yml
+```
 
 ### Instance Creation Flow
 
@@ -183,86 +164,85 @@ Create directories:
    - data/instances/[ID]/config/
    - data/instances/[ID]/workspace/
    ↓
+Seed workspace from templates/workspace/
+   ↓
 Generate gateway token (48 hex chars)
    ↓
 Write openclaw.json config
    ↓
-Docker run:
-   - Image: openclaw:local
-   - Name: openclaw-[ID]
-   - Port: 19000+
-   - Volumes: config, workspace
+Docker create + start (hardened container)
    ↓
-Update instances.json database
+Update instances.json (file-locked)
    ↓
-Return instance details to user
+Return instance details + token to user
 ```
 
-### Container Configuration
+### Container Security
 
-Each instance is launched with hardened defaults:
+Each instance runs with hardened defaults:
 
-**Resource limits (per instance):**
-- **Memory:** 512MB hard limit (no swap)
-- **CPU:** 0.5 cores (`nano_cpus=500_000_000`)
-- These prevent any single instance from starving others
+| Setting | Value | Purpose |
+|---------|-------|---------|
+| `ReadonlyRootfs` | `true` | Immutable container filesystem |
+| `Tmpfs /tmp` | `64MB` | Writable scratch space only |
+| `CapDrop` | `ALL` | Drop all Linux capabilities |
+| `CapAdd` | `NET_BIND_SERVICE` | Only re-add port binding |
+| `SecurityOpt` | `no-new-privileges` | Block SUID/SGID escalation |
+| `Memory` | `512MB` (no swap) | Per-instance hard limit |
+| `CPU` | `0.5 cores` | Per-instance limit |
+| `RestartPolicy` | `unless-stopped` | Auto-restart on crash |
+| `Init` | `true` | Proper PID 1 signal handling |
+| `PortBinding` | Tailscale IP only | Not reachable from LAN |
 
-**Security hardening:**
-- All Linux capabilities dropped (`--cap-drop ALL`)
-- Only `NET_BIND_SERVICE` re-added (needed for port binding)
-- `--security-opt no-new-privileges` — blocks SUID/SGID privilege escalation
-- Bound only to the Tailscale IP (`100.x.x.x`) — not reachable from LAN
-
-**Network isolation:**
-- Internal port: 18789 (OpenClaw gateway default)
-- External port: 19000+ (mapped dynamically, Tailscale-only)
-- User: `node` (inside container)
-- Restart policy: `unless-stopped`
-
-**Generated Docker run (equivalent):**
+**Equivalent Docker run:**
 ```bash
 docker run -d \
-  --name openclaw-[INSTANCE_ID] \
+  --name openclaw-[ID] \
+  --read-only --tmpfs /tmp:rw,size=64m \
   --cap-drop ALL --cap-add NET_BIND_SERVICE \
   --security-opt no-new-privileges \
-  --memory 512m --memory-swap 512m \
-  --cpus 0.5 \
+  --memory 512m --memory-swap 512m --cpus 0.5 \
+  --init --restart unless-stopped \
   -p 100.x.x.x:[PORT]:18789 \
-  -v [CONFIG_DIR]:/home/node/.openclaw \
-  -v [WORKSPACE_DIR]:/home/node/.openclaw/workspace \
-  --restart unless-stopped \
+  -v [CONFIG]:/home/node/.openclaw:rw \
+  -v [WORKSPACE]:/home/node/.openclaw/workspace:rw \
   -e HOME=/home/node \
   -e OPENCLAW_GATEWAY_TOKEN=[TOKEN] \
   openclaw:local \
   node dist/index.js gateway --bind lan --port 18789
 ```
 
-### Workspace Seeding
+### Health Reconciler
 
-On first deploy, the launcher seeds the instance workspace from `templates/workspace/`:
+A background process runs every 60 seconds:
+- Checks actual Docker container status for all instances
+- Updates an in-memory status cache (avoids Docker API calls on every request)
+- Detects state transitions (running → exited/dead)
+- Tracks restart counters per instance
+- Cleans up stale cache entries
+
+### WebSocket Log Streaming
+
+The `/api/logs/:id/stream` endpoint provides real-time log output:
+- Authenticates via `?token=` query parameter on upgrade
+- Tails last 50 lines immediately on connect
+- Follows new output in real-time
+- Cleans up Docker log stream on client disconnect
+- Frontend auto-falls back to HTTP polling if WebSocket fails
+
+### Prometheus Metrics
+
+`GET /metrics` returns standard Prometheus text format:
 
 ```
-templates/
-└── workspace/
-    ├── SOUL.md        # Default agent persona
-    ├── AGENTS.md      # Behavioral guidelines
-    └── BOOTSTRAP.md   # First-run setup instructions
+openclaw_instances_total 5
+openclaw_instances_running 3
+openclaw_instance_restarts_total{instance="60839bdbe7f2"} 0
+openclaw_instance_cpu_percent{instance="60839bdbe7f2"} 2.3400
+openclaw_instance_memory_bytes{instance="60839bdbe7f2"} 327680000
 ```
 
-Files are only copied if they don't already exist — safe to redeploy without overwriting user data.
-
-**IDENTITY.md** is always generated fresh per instance:
-```markdown
-# Identity
-
-- **Wallet:** `aVuLr2twoecnZGWqHFVtRtPM6W5iwSPfHRr9cpp9mMf`
-- **Instance:** `60839bdbe7f2`
-- **Created:** 2026-02-21 03:49:00 UTC
-```
-
-### Token Masking
-
-The gateway token in instance details is masked in the web UI (shown as `••••••••...`). The full token is only returned once at launch time and stored in `instances.json`. Users should copy it immediately on first deploy.
+**Security:** Instance labels use ID only — no wallet addresses exposed.
 
 ---
 
@@ -274,61 +254,36 @@ All `/api/*` endpoints require authentication when `LAUNCHER_TOKEN` is set:
 
 ```bash
 # Header auth (recommended)
-curl -H "Authorization: Bearer <LAUNCHER_TOKEN>" http://localhost:8780/api/instances
+curl -H "Authorization: Bearer $TOKEN" http://localhost:8780/api/instances
 
 # Query param auth (for browser/UI)
-curl http://localhost:8780/api/instances?token=<LAUNCHER_TOKEN>
+curl http://localhost:8780/api/instances?token=$TOKEN
 ```
 
-Returns `401 Unauthorized` if token is missing or invalid.
+Token comparison uses `crypto.timingSafeEqual` (constant-time, safe against timing attacks).
 
 ### Endpoints
 
-**`GET /`**  
-Web UI (main dashboard) — no auth required
+| Method | Path | Auth | Description |
+|--------|------|------|-------------|
+| `GET` | `/` | No | Web UI dashboard |
+| `GET` | `/docs` | No | Rendered README documentation |
+| `GET` | `/health` | No | Health check |
+| `GET` | `/metrics` | No | Prometheus metrics |
+| `GET` | `/api/instances` | Yes | List all instances |
+| `POST` | `/api/launch` | Yes | Deploy or restart instance |
+| `POST` | `/api/stop` | Yes | Stop instance |
+| `POST` | `/api/destroy` | Yes | Remove instance |
+| `GET` | `/api/stats/:id` | Yes | Live CPU/memory stats |
+| `GET` | `/api/logs/:id` | Yes | Fetch recent logs (HTTP) |
+| `WS` | `/api/logs/:id/stream` | Yes | Stream logs (WebSocket) |
+| `GET` | `/api/files/:iid` | Yes | List workspace files |
+| `GET` | `/api/files/:iid/:file` | Yes | Read file |
+| `PUT` | `/api/files/:iid/:file` | Yes | Edit existing file |
 
-**`GET /docs`**  
-Rendered README documentation (HTML) — no auth required
+### Key Responses
 
-**`GET /health`**  
-Health check — no auth required
-
-**Response:**
-```json
-{ "ok": true, "instances": 3 }
-```
-
-**`GET /api/instances`**  
-List all instances with live Docker status. **Note:** `gateway_token` is never included in this response.
-
-**Response:**
-```json
-{
-  "instances": [
-    {
-      "id": "60839bdbe7f2",
-      "pubkey": "aVuLr...",
-      "port": 19000,
-      "status": "running",
-      "created": 1708473600,
-      "last_started": 1708473600,
-      "container_id": "a1b2c3d4e5f6"
-    }
-  ]
-}
-```
-
-**`POST /api/launch`**  
-Deploy a new instance or restart a stopped one
-
-**Request:**
-```json
-{
-  "pubkey": "aVuLr2twoecnZGWqHFVtRtPM6W5iwSPfHRr9cpp9mMf"
-}
-```
-
-**Response (new instance):**
+**Launch:**
 ```json
 {
   "instance": {
@@ -341,434 +296,98 @@ Deploy a new instance or restart a stopped one
 }
 ```
 
-**Response (already running):**
+**List instances** (gateway_token is never included):
 ```json
 {
-  "error": "Instance already running",
-  "instance": { ... }
+  "instances": [
+    { "id": "60839bdbe7f2", "pubkey": "aVuLr...", "port": 19000, "status": "running" }
+  ]
 }
 ```
-HTTP 409 Conflict
 
-**`POST /api/stop`**  
-Stop a running instance (data preserved)
-
-**Request:**
-```json
-{ "pubkey": "aVuLr..." }
-```
-
-**Response:**
-```json
-{ "status": "stopped", "id": "60839bdbe7f2" }
-```
-
-**`POST /api/destroy`**  
-Stop and permanently remove a container (data preserved on disk)
-
-**Request:**
-```json
-{ "pubkey": "aVuLr..." }
-```
-
-**Response:**
-```json
-{ "status": "destroyed", "id": "60839bdbe7f2" }
-```
-
-**`GET /api/stats/[INSTANCE_ID]`**  
-Live CPU and memory stats for a running container
-
-**Response:**
+**Stats:**
 ```json
 {
   "status": "running",
-  "stats": {
-    "cpu": "2.34%",
-    "mem": "312.5MiB / 512.0MiB",
-    "mem_pct": "61.04%"
-  }
+  "stats": { "cpu": "2.34%", "mem": "312.5MiB / 512.0MiB", "mem_pct": "61.04%" }
 }
 ```
 
-**`GET /api/files/[INSTANCE_ID]`**  
-List workspace `.md` files for an instance
+---
 
-**Response:**
-```json
-{ "files": ["SOUL.md", "MEMORY.md", "IDENTITY.md"] }
-```
+## Database
 
-**`GET /api/files/[INSTANCE_ID]/[filename]`**  
-Read a workspace file (`.md` or `.json` only, no path traversal)
+**Location:** `data/instances.json`
 
-**Response:**
-```json
-{
-  "content": "# Identity\n...",
-  "filename": "IDENTITY.md",
-  "exists": true
-}
-```
+Protected by file locking (`proper-lockfile`) for safe concurrent access. All write operations (launch, destroy) acquire an exclusive lock before read→modify→write.
 
-**`PUT /api/files/[INSTANCE_ID]/[filename]`**  
-Update an existing workspace file (edit-only — cannot create new files)
-
-**Request:**
-```json
-{ "content": "# Updated content\n..." }
-```
-
-**Response:**
-```json
-{ "ok": true }
-```
-
-Returns `403 Forbidden` if the file doesn't already exist.
-
-**`GET /api/logs/[INSTANCE_ID]?lines=50`**  
-Fetch recent container log output. `lines` is capped at 500.
-
-**Response:**
-```json
-{
-  "logs": "[2026-02-21 03:49:12] Gateway listening on port 18789\n..."
-}
+**Backup:**
+```bash
+cp data/instances.json data/instances.json.backup
 ```
 
 ---
 
 ## Monitoring
 
-### Container Status
-
-**Check specific instance:**
-```bash
-docker ps -f name=openclaw-60839bdbe7f2
-docker logs openclaw-60839bdbe7f2
-docker stats openclaw-60839bdbe7f2
-```
-
-**Check all instances:**
-```bash
-docker ps -f name=openclaw-*
-```
-
-### Resource Usage
-
-**Via web UI:**
-- Dashboard shows CPU%, memory per instance
-- Auto-refreshes every 30s
+**Via web UI:** Dashboard shows status, CPU%, memory per instance. Auto-refreshes every 5 seconds.
 
 **Via CLI:**
 ```bash
 docker stats --no-stream $(docker ps -f name=openclaw- -q)
 ```
 
-### Logs
-
-**Launcher logs:**
-```bash
-tail -f launcher.log  # if running in background
-```
-
-**Instance logs:**
-```bash
-docker logs -f openclaw-[INSTANCE_ID]
-```
+**Via Prometheus:** Scrape `http://localhost:8780/metrics`
 
 ---
 
 ## Troubleshooting
 
 ### Instance won't start
-
-**Check Docker:**
 ```bash
 docker ps -a -f name=openclaw-[ID]
 docker logs openclaw-[ID]
 ```
 
-**Common issues:**
-- Port already in use → Check `instances.json`, kill conflicting process
-- Out of memory → Stop other instances, increase host RAM
-- Image missing → Build `openclaw:local` Docker image
-
-**Force restart:**
-```bash
-docker stop openclaw-[ID]
-docker rm openclaw-[ID]
-# Then redeploy via web UI
-```
+Common issues:
+- Port already in use → check `instances.json`, kill conflicting process
+- Out of memory → stop other instances
+- Image missing → build `openclaw:local`
 
 ### "Maximum instances reached"
+Current limit: 20. Change `MAX_INSTANCES` in `src/server.ts`.
 
-**Current limit:** 20 instances
-
-**Increase limit:**
-Edit `server.py`:
-```python
-MAX_INSTANCES = 50  # Or whatever your hardware supports
-```
-
-**Check active instances:**
+### Database issues
 ```bash
-curl -H "Authorization: Bearer $LAUNCHER_TOKEN" http://localhost:8780/api/instances | jq '.instances | length'
-```
-
-### Database corruption
-
-**Symptoms:**
-- Instances.json malformed
-- Missing instance entries
-- Port conflicts
-
-**Fix:**
-```bash
-# Backup current state
 cp data/instances.json data/instances.json.broken
-
-# Rebuild from Docker
-python3 -c "
-import json
-import subprocess
-
-result = subprocess.run(
-    ['docker', 'ps', '-a', '--filter', 'name=openclaw-', '--format', '{{.Names}}\t{{.Ports}}'],
-    capture_output=True, text=True
-)
-
-instances = {}
-for line in result.stdout.strip().split('\n'):
-    if not line:
-        continue
-    name, ports = line.split('\t')
-    iid = name.replace('openclaw-', '')
-    port = int(ports.split(':')[1].split('->')[0]) if '->' in ports else 0
-    instances[iid] = {'port': port, 'status': 'unknown'}
-
-db = {'instances': instances}
-print(json.dumps(db, indent=2))
-" > data/instances.json
+echo '{"instances":{}}' > data/instances.json
 ```
-
-### Port conflicts
-
-**Find what's using a port:**
-```bash
-lsof -i :19000
-netstat -tulpn | grep 19000
-```
-
-**Kill process:**
-```bash
-kill -9 [PID]
-```
-
-**Or reassign in database:**
-Edit `instances.json`, change port, restart container with new mapping.
-
----
-
-## Security
-
-### Launcher Authentication
-
-The launcher API is protected by a bearer token set via the `LAUNCHER_TOKEN` environment variable.
-
-**How it works:**
-- All `/api/*` routes require authentication when `LAUNCHER_TOKEN` is set
-- Token can be provided as:
-  - `Authorization: Bearer <token>` header (recommended for scripts/API)
-  - `?token=<token>` query parameter (used by the web UI)
-- `/`, `/docs`, `/health`, and static files are public (no sensitive data)
-- Token comparison uses `secrets.compare_digest()` (timing-safe)
-
-**If `LAUNCHER_TOKEN` is not set, the API is unauthenticated** — only acceptable behind Tailscale or a VPN.
-
-```bash
-# API call with auth
-curl -H "Authorization: Bearer your-token" http://localhost:8780/api/instances
-
-# Web UI access
-http://localhost:8780/?token=your-token
-```
-
-### Gateway Tokens
-
-Each instance has a **unique 48-char hex token** for OpenClaw gateway authentication.
-
-**Token lifecycle:**
-- Generated on first deploy (`secrets.token_hex(24)`)
-- **Returned only once** — in the `/api/launch` response
-- **Never returned** by `/api/instances` (stripped from response)
-- Stored in `instances.json` on disk
-- Visible in web UI via "Reveal" toggle (frontend only, not in API)
-
-**Recommendations:**
-- **Copy your token immediately** on first deploy — it won't be shown again via API
-- **Protect `instances.json`** — it contains all gateway tokens on disk
-- **Rotate tokens** by destroying and redeploying the instance
-
-### Database Concurrency
-
-`instances.json` is protected by exclusive file locking (`fcntl.flock`) to prevent race conditions under concurrent requests (gunicorn with multiple workers). All write operations (launch, destroy) acquire the lock before read→modify→write.
-
-### Network Exposure
-
-**Current setup:**
-- Launcher UI: port 8780 (Tailscale only)
-- Instances: ports 19000+ bound to Tailscale IP only (configurable via `TAILSCALE_IP` env var)
-- **Not reachable from LAN or internet** — Tailscale access required
-
-**Production recommendations:**
-- Set `LAUNCHER_TOKEN` — never run without auth on a shared network
-- Keep Tailscale binding (default) for maximum isolation
-- Add HTTPS reverse proxy (nginx/Caddy) if exposing publicly
-- Firewall rule: deny 19000-19020 from non-Tailscale interfaces
-
-### Container Isolation
-
-**What's isolated:**
-- Filesystem (workspace, config — per-instance volumes)
-- Process namespace
-- Capabilities (all dropped except `NET_BIND_SERVICE`)
-- Privilege escalation (blocked via `no-new-privileges`)
-- Memory (512MB hard cap)
-- CPU (0.5 core limit)
-
-**What's shared:**
-- Host kernel
-- Docker daemon
-- Tailscale network interface
-
-**Risk:** 
-A kernel exploit or Docker daemon vulnerability could affect other containers. Limit to trusted wallet holders. Do not run on a machine with other sensitive workloads.
-
-### File API Safety
-
-The file editor API (`/api/files/`) enforces strict access controls:
-- **Whitelist extensions:** `.md` and `.json` only
-- **No path traversal:** `/`, `\`, and `..` are rejected
-- **Max filename length:** 64 chars
-- **Edit-only:** can only write to files that already exist (no new file creation via API)
-- **Instance scoped:** each request is validated against `instances.json` before filesystem access
-
----
-
-## Maintenance
-
-### Backups
-
-**Critical files:**
-```bash
-# Database
-cp data/instances.json backups/instances-$(date +%Y%m%d).json
-
-# All instance data
-tar -czf backups/instances-$(date +%Y%m%d).tar.gz data/instances/
-```
-
-**Schedule daily:**
-```bash
-0 3 * * * /path/to/backup-launcher.sh
-```
-
-### Updates
-
-**Update OpenClaw image:**
-```bash
-# Build new image
-docker build -t openclaw:local /path/to/openclaw
-
-# Restart instances (one at a time)
-docker restart openclaw-[ID]
-```
-
-**Update launcher code:**
-```bash
-# Stop launcher
-pkill -f server.py
-
-# Update server.py
-git pull  # or manual edit
-
-# Restart launcher
-python3 server.py &
-```
-
-### Cleanup
-
-**Remove stopped instances:**
-```bash
-docker container prune -f --filter "name=openclaw-"
-```
-
-**Remove old workspace data:**
-```bash
-# Find instances not in database
-# Compare data/instances/* vs instances.json
-# Delete orphaned directories
-```
+Then redeploy instances via the UI.
 
 ---
 
 ## Development
 
-### Local Testing
-
 ```bash
-# Run without auth (dev only)
-python3 server.py
+# Dev mode (auto-reload via tsx)
+npm run dev
 
-# Run with auth
-LAUNCHER_TOKEN=dev-secret python3 server.py
+# Type check
+npx tsc --noEmit
 
-# Test with mock instances
-curl -X POST http://localhost:8780/api/launch \
-  -H "Content-Type: application/json" \
-  -H "Authorization: Bearer dev-secret" \
-  -d '{"pubkey":"test123abc456"}'
+# Build
+npm run build
+
+# Test locally
+LAUNCHER_TOKEN=dev-secret npm run dev
 ```
-
-### Adding Features
-
-**Common extensions:**
-- Custom resource limits per instance
-- Billing/usage tracking
-- Auto-scaling (spawn more when needed)
-- Health checks (ping instances periodically)
-- Metrics export (Prometheus, Grafana)
-
-**Entry points:**
-- `server.py` — main Flask app
-- `templates/index.html` — web UI
-- `data/instances.json` — state database
-
----
-
-## Support
-
-**Issues:**
-- Check logs: `docker logs openclaw-[ID]`
-- Check this README troubleshooting section
-- Contact: Jack Levin (@mrJackLevin on X)
-
-**Source:**
-- OpenClaw: https://github.com/openclaw/openclaw
-- Launcher: (this repository)
-
-**Community:**
-- X1 Validators Telegram: (group link)
-- X1 Discord: https://discord.com/invite/clawd
 
 ---
 
 ## License
 
-Same as OpenClaw core. Check main repository for details.
+MIT
 
 ---
 
-**Built for X1 Validators by Jack Levin**  
-*Making AI agents accessible, one wallet at a time.* 🎩
+**Built for X1 Validators by Jack Levin** 🎩
