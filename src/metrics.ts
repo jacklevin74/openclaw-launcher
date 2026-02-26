@@ -7,6 +7,7 @@
 
 import { loadDb } from "./db.js";
 import { statusCache, restartCounters } from "./reconciler.js";
+import { proxyMetrics, getTopBlockedDestinations } from "./proxy.js";
 
 /**
  * Format all metrics as Prometheus text exposition format.
@@ -39,6 +40,12 @@ export function formatMetrics(): string {
     memLines.push(`openclaw_instance_memory_bytes{${label}} ${memBytes}`);
   }
 
+  // Proxy metrics
+  const topBlocked = getTopBlockedDestinations(10);
+  const blockedDestLines: string[] = topBlocked.map(
+    ({ host, count }) => `openclaw_proxy_blocked_destinations{host="${host}"} ${count}`
+  );
+
   const lines: string[] = [
     "# HELP openclaw_instances_total Total number of instances in the database",
     "# TYPE openclaw_instances_total gauge",
@@ -59,6 +66,15 @@ export function formatMetrics(): string {
     "# HELP openclaw_instance_memory_bytes Memory usage in bytes per instance",
     "# TYPE openclaw_instance_memory_bytes gauge",
     ...memLines,
+    "",
+    "# HELP openclaw_proxy_requests_total Total proxy requests by action",
+    "# TYPE openclaw_proxy_requests_total counter",
+    `openclaw_proxy_requests_total{action="allowed"} ${proxyMetrics.allowedTotal}`,
+    `openclaw_proxy_requests_total{action="blocked"} ${proxyMetrics.blockedTotal}`,
+    "",
+    "# HELP openclaw_proxy_blocked_destinations Top blocked destination hosts",
+    "# TYPE openclaw_proxy_blocked_destinations gauge",
+    ...blockedDestLines,
     "",
   ];
 

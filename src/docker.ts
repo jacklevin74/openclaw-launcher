@@ -5,12 +5,19 @@
 import { createHash } from "node:crypto";
 import Dockerode from "dockerode";
 import type { Readable } from "node:stream";
+import { getProxyPort } from "./proxy.js";
 
 const docker = new Dockerode({ socketPath: "/var/run/docker.sock" });
 
 // Constants
 export const OPENCLAW_IMAGE = "openclaw:local";
 const TAILSCALE_IP = process.env.TAILSCALE_IP || "100.118.141.107";
+const PROXY_NETWORK_NAME = "openclaw-proxy-net";
+const PROXY_NETWORK_SUBNET = "172.28.0.0/16";
+const PROXY_NETWORK_GATEWAY = "172.28.0.1";
+
+/** Cached gateway IP for the proxy network. */
+let proxyNetworkGateway: string | null = null;
 
 /**
  * Deterministic short ID from wallet pubkey — sha256 hex[:12].
@@ -88,6 +95,67 @@ function formatBytes(num: number): string {
   return `${num.toFixed(1)}${units[i]}`;
 }
 
+/**
+ * Ensure the custom Docker bridge network for proxy routing exists.
+ * Creates 'openclaw-proxy-net' if it doesn't exist.
+ * Returns the gateway IP for proxy binding.
+ */
+export async function ensureProxyNetwork(): Promise<string> {
+  if (proxyNetworkGateway) return proxyNetworkGateway;
+
+  try {
+    // Check if network already exists
+    const networks = await docker.listNetworks({
+      filters: { name: [PROXY_NETWORK_NAME] },
+    });
+
+    const existing = networks.find((n: any) => n.Name === PROXY_NETWORK_NAME);
+    if (existing) {
+      // Extract gateway from existing network
+      const network = docker.getNetwork(existing.Id);
+      const info = await network.inspect();
+      const ipamConfig = info.IPAM?.Config?.[0];
+      proxyNetworkGateway = ipamConfig?.Gateway || PROXY_NETWORK_GATEWAY;
+      console.log(`[docker] Proxy network '${PROXY_NETWORK_NAME}' already exists (gateway: ${proxyNetworkGateway})`);
+      return proxyNetworkGateway;
+    }
+
+    // Create the network
+    await docker.createNetwork({
+      Name: PROXY_NETWORK_NAME,
+      Driver: "bridge",
+      IPAM: {
+        Driver: "default",
+        Config: [
+          {
+            Subnet: PROXY_NETWORK_SUBNET,
+            Gateway: PROXY_NETWORK_GATEWAY,
+          },
+        ],
+      },
+      Options: {
+        "com.docker.network.bridge.enable_icc": "false", // Disable inter-container communication
+      },
+    });
+
+    proxyNetworkGateway = PROXY_NETWORK_GATEWAY;
+    console.log(`[docker] Created proxy network '${PROXY_NETWORK_NAME}' (gateway: ${proxyNetworkGateway})`);
+    return proxyNetworkGateway;
+  } catch (err: any) {
+    console.error(`[docker] Failed to ensure proxy network: ${err.message}`);
+    // Fall back to default gateway — proxy may still work if manually configured
+    proxyNetworkGateway = PROXY_NETWORK_GATEWAY;
+    return proxyNetworkGateway;
+  }
+}
+
+/**
+ * Get the proxy network gateway IP (or null if not initialized).
+ */
+export function getProxyNetworkGateway(): string | null {
+  return proxyNetworkGateway;
+}
+
 export interface LaunchParams {
   name: string;
   port: number;
@@ -98,8 +166,14 @@ export interface LaunchParams {
 
 /**
  * Launch a new container with full security config.
+ * Attaches to the proxy network and sets HTTP_PROXY/HTTPS_PROXY env vars.
  */
 export async function launchContainer(params: LaunchParams): Promise<Dockerode.Container> {
+  // Ensure proxy network exists and get gateway IP
+  const gatewayIP = await ensureProxyNetwork();
+  const proxyPort = getProxyPort();
+  const proxyUrl = `http://${gatewayIP}:${proxyPort}`;
+
   const container = await docker.createContainer({
     Image: OPENCLAW_IMAGE,
     name: params.name,
@@ -108,6 +182,12 @@ export async function launchContainer(params: LaunchParams): Promise<Dockerode.C
       `HOME=/home/node`,
       `TERM=xterm-256color`,
       `OPENCLAW_GATEWAY_TOKEN=${params.gatewayToken}`,
+      `HTTP_PROXY=${proxyUrl}`,
+      `HTTPS_PROXY=${proxyUrl}`,
+      `http_proxy=${proxyUrl}`,
+      `https_proxy=${proxyUrl}`,
+      `NO_PROXY=localhost,127.0.0.1`,
+      `no_proxy=localhost,127.0.0.1`,
     ],
     ExposedPorts: { "18789/tcp": {} },
     HostConfig: {
@@ -128,6 +208,7 @@ export async function launchContainer(params: LaunchParams): Promise<Dockerode.C
         `${params.configDir}:/home/node/.openclaw:rw`,
         `${params.workspaceDir}:/home/node/.openclaw/workspace:rw`,
       ],
+      NetworkMode: PROXY_NETWORK_NAME,
     },
   });
 

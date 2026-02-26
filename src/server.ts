@@ -30,6 +30,13 @@ import {
 } from "./docker.js";
 import { statusCache, restartCounters, startReconciler } from "./reconciler.js";
 import { formatMetrics } from "./metrics.js";
+import {
+  startProxy,
+  getProxyStats,
+  setInstanceAllowlist,
+  clearInstanceAllowlist,
+} from "./proxy.js";
+import { ensureProxyNetwork } from "./docker.js";
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -509,6 +516,51 @@ app.put("/api/files/:iid/:filename", (req, res) => {
 });
 
 // ---------------------------------------------------------------------------
+// Routes — Proxy API
+// ---------------------------------------------------------------------------
+
+// Get proxy stats
+app.get("/api/proxy/stats", (_req, res) => {
+  res.json(getProxyStats());
+});
+
+// Update per-instance allowlist
+app.put("/api/proxy/allowlist/:instanceId", (req, res) => {
+  const { instanceId } = req.params;
+  const { hosts } = req.body || {};
+
+  if (!instanceId) {
+    res.status(400).json({ error: "Missing instanceId" });
+    return;
+  }
+
+  if (!Array.isArray(hosts)) {
+    res.status(400).json({ error: "Body must contain 'hosts' array of strings" });
+    return;
+  }
+
+  // Validate hosts are strings
+  const validHosts = hosts.filter((h: unknown): h is string => typeof h === "string" && h.length > 0);
+
+  if (validHosts.length === 0) {
+    // Empty array = clear the per-instance override
+    clearInstanceAllowlist(instanceId);
+    res.json({ ok: true, instanceId, hosts: [], note: "Cleared per-instance allowlist, using defaults" });
+    return;
+  }
+
+  setInstanceAllowlist(instanceId, validHosts);
+  res.json({ ok: true, instanceId, hosts: validHosts });
+});
+
+// Delete per-instance allowlist
+app.delete("/api/proxy/allowlist/:instanceId", (req, res) => {
+  const { instanceId } = req.params;
+  clearInstanceAllowlist(instanceId);
+  res.json({ ok: true, instanceId, note: "Cleared per-instance allowlist" });
+});
+
+// ---------------------------------------------------------------------------
 // HTTP server + WebSocket
 // ---------------------------------------------------------------------------
 
@@ -604,9 +656,28 @@ if (existsSync(docsTemplateSrc) && !existsSync(docsTemplateDest)) {
   }
 }
 
-// Start the reconciler
-startReconciler();
+// Start the egress proxy and reconciler
+(async () => {
+  try {
+    // Ensure Docker proxy network exists
+    const gatewayIP = await ensureProxyNetwork();
 
-server.listen(PORT, "0.0.0.0", () => {
-  console.log(`OpenClaw Launcher listening on 0.0.0.0:${PORT}`);
-});
+    // Start egress proxy bound to the Docker bridge gateway
+    startProxy({
+      bindAddress: "0.0.0.0",   // Bind to all interfaces so Docker bridge traffic can reach it
+      port: parseInt(process.env.PROXY_PORT || "3128", 10),
+    });
+
+    console.log(`[startup] Egress proxy will route via gateway ${gatewayIP}`);
+  } catch (err) {
+    console.error("[startup] Failed to start egress proxy:", err);
+    console.warn("[startup] Continuing without egress filtering — containers will have unrestricted network access");
+  }
+
+  // Start the reconciler
+  startReconciler();
+
+  server.listen(PORT, "0.0.0.0", () => {
+    console.log(`OpenClaw Launcher listening on 0.0.0.0:${PORT}`);
+  });
+})();
