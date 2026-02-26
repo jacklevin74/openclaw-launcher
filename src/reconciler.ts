@@ -7,6 +7,7 @@
 
 import { loadDb } from "./db.js";
 import { containerName, getContainerStatus } from "./docker.js";
+import { isProxyRunning } from "./proxy.js";
 import Dockerode from "dockerode";
 
 const docker = new Dockerode({ socketPath: "/var/run/docker.sock" });
@@ -30,6 +31,11 @@ let reconcilerInterval: ReturnType<typeof setInterval> | null = null;
  * Single reconciliation pass.
  */
 async function reconcileOnce(): Promise<void> {
+  // Check proxy health
+  if (!isProxyRunning()) {
+    console.warn("[reconciler] WARNING: Egress proxy is NOT running — container traffic is unfiltered!");
+  }
+
   const db = loadDb();
   const instances = db.instances;
   const currentIds = new Set(Object.keys(instances));
