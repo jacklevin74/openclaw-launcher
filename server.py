@@ -6,11 +6,12 @@ Deploys unique OpenClaw instances linked to SVM wallet public keys.
 
 import os
 import json
-import uuid
+import fcntl
 import hashlib
 import time
 import secrets
 import shutil
+from contextlib import contextmanager
 from pathlib import Path
 from flask import Flask, render_template, request, jsonify, send_from_directory
 try:
@@ -34,6 +35,12 @@ OPENCLAW_IMAGE = "openclaw:local"
 BASE_PORT = 19000  # Instances get ports 19000+
 MAX_INSTANCES = 20  # Safety limit for this NUC
 
+# Tailscale IP — read from env, fallback to default
+TAILSCALE_IP = os.environ.get("TAILSCALE_IP", "100.118.141.107")
+
+# Auth token — if set, all /api/ routes require Authorization: Bearer <token>
+LAUNCHER_TOKEN = os.environ.get("LAUNCHER_TOKEN", "")
+
 # Docker client (lazy init)
 _docker_client = None
 
@@ -47,13 +54,68 @@ def docker_client():
 def docker_unreachable_error() -> dict:
     return {"error": "Docker daemon is unreachable. Is the Docker service running?"}
 
+
+# ---------------------------------------------------------------------------
+# Authentication
+# ---------------------------------------------------------------------------
+
+@app.before_request
+def check_auth():
+    """Require Bearer token for all /api/ routes if LAUNCHER_TOKEN is set."""
+    if not LAUNCHER_TOKEN:
+        return  # Auth disabled — no token configured
+    if not request.path.startswith("/api/"):
+        return  # Only protect API routes
+
+    # Accept token via Authorization header or ?token= query param
+    auth_header = request.headers.get("Authorization", "")
+    query_token = request.args.get("token", "")
+
+    provided = ""
+    if auth_header.startswith("Bearer "):
+        provided = auth_header[7:]
+    elif query_token:
+        provided = query_token
+
+    if not secrets.compare_digest(provided, LAUNCHER_TOKEN):
+        return jsonify({"error": "Unauthorized"}), 401
+
+
+# ---------------------------------------------------------------------------
+# Database with file locking
+# ---------------------------------------------------------------------------
+
+@contextmanager
+def locked_db():
+    """Open instances.json with an exclusive lock, yield parsed data, write on exit."""
+    DB_FILE.touch(exist_ok=True)  # ensure file exists
+    with open(DB_FILE, "r+") as fh:
+        fcntl.flock(fh, fcntl.LOCK_EX)
+        try:
+            fh.seek(0)
+            raw = fh.read().strip()
+            db = json.loads(raw) if raw else {"instances": {}}
+            yield db
+            fh.seek(0)
+            fh.truncate()
+            fh.write(json.dumps(db, indent=2))
+        finally:
+            fcntl.flock(fh, fcntl.LOCK_UN)
+
+
 def load_db():
     if DB_FILE.exists():
-        return json.loads(DB_FILE.read_text())
+        raw = DB_FILE.read_text().strip()
+        return json.loads(raw) if raw else {"instances": {}}
     return {"instances": {}}
 
 def save_db(db):
     DB_FILE.write_text(json.dumps(db, indent=2))
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
 
 def wallet_to_id(pubkey: str) -> str:
     """Deterministic short ID from wallet pubkey."""
@@ -118,6 +180,10 @@ def get_container_stats(name: str) -> dict:
         return {"error": "docker_unreachable"}
 
 
+# ---------------------------------------------------------------------------
+# Routes — UI
+# ---------------------------------------------------------------------------
+
 @app.route("/")
 def index():
     return render_template("index.html")
@@ -128,9 +194,9 @@ def docs():
     readme_path = BASE_DIR / "README.md"
     if not readme_path.exists():
         return "Documentation not found", 404
-    
+
     readme_content = readme_path.read_text()
-    
+
     # Convert markdown to HTML if library available
     if markdown:
         html_content = markdown.markdown(
@@ -140,9 +206,18 @@ def docs():
     else:
         # Fallback: wrap in <pre> if markdown not installed
         html_content = f"<pre>{readme_content}</pre>"
-    
+
     return render_template("docs.html", content=html_content)
 
+
+@app.route("/health")
+def health():
+    return jsonify({"ok": True, "instances": len(load_db().get("instances", {}))})
+
+
+# ---------------------------------------------------------------------------
+# Routes — API
+# ---------------------------------------------------------------------------
 
 @app.route("/api/instances", methods=["GET"])
 def list_instances():
@@ -151,9 +226,11 @@ def list_instances():
     for iid, inst in db["instances"].items():
         cname = container_name(iid)
         status = get_container_status(cname)
-        inst["status"] = status
-        inst["id"] = iid
-        instances.append(inst)
+        # Return a copy without gateway_token (sensitive credential)
+        safe = {k: v for k, v in inst.items() if k != "gateway_token"}
+        safe["status"] = status
+        safe["id"] = iid
+        instances.append(safe)
     return jsonify({"instances": instances})
 
 
@@ -165,141 +242,138 @@ def launch_instance():
     if not pubkey or len(pubkey) < 32 or len(pubkey) > 64:
         return jsonify({"error": "Invalid wallet public key"}), 400
 
-    db = load_db()
     iid = wallet_to_id(pubkey)
 
-    # Check if already exists
-    if iid in db["instances"]:
-        existing = db["instances"][iid]
+    with locked_db() as db:
+        # Check if already exists
+        if iid in db["instances"]:
+            existing = db["instances"][iid]
+            cname = container_name(iid)
+            status = get_container_status(cname)
+            if status == "docker_unreachable":
+                return jsonify(docker_unreachable_error()), 503
+            if status == "running":
+                return jsonify({
+                    "error": "Instance already running",
+                    "instance": {k: v for k, v in existing.items() if k != "gateway_token"} | {"id": iid, "status": status}
+                }), 409
+            # Exists but stopped — restart it
+            try:
+                client = docker_client()
+                container = client.containers.get(cname)
+                container.start()
+                time.sleep(2)
+                existing["status"] = get_container_status(cname)
+                existing["last_started"] = int(time.time())
+                # Return full data including gateway_token on (re)launch
+                return jsonify({"instance": {**existing, "id": iid}})
+            except NotFound:
+                return jsonify({"error": "Container not found"}), 404
+            except DockerException:
+                return jsonify(docker_unreachable_error()), 503
+
+        if len(db["instances"]) >= MAX_INSTANCES:
+            return jsonify({"error": f"Maximum {MAX_INSTANCES} instances reached"}), 429
+
+        # Create new instance
+        port = get_next_port(db)
+        gateway_token = secrets.token_hex(24)
+        instance_dir = INSTANCES_DIR / iid
+        config_dir = instance_dir / "config"
+        workspace_dir = instance_dir / "workspace"
+        config_dir.mkdir(parents=True, exist_ok=True)
+        workspace_dir.mkdir(parents=True, exist_ok=True)
+
+        # Seed workspace from templates/workspace/ if it exists
+        try:
+            tmpl_dir = BASE_DIR / "templates" / "workspace"
+            if tmpl_dir.exists():
+                for src in tmpl_dir.iterdir():
+                    if src.is_file():
+                        dest = workspace_dir / src.name
+                        if not dest.exists():  # don't overwrite on restart
+                            shutil.copy2(src, dest)
+        except Exception:
+            pass  # never break a deploy over missing templates
+
+        # Write minimal openclaw config
+        oc_config = {
+            "agents": {
+                "defaults": {
+                    "workspace": "/home/node/.openclaw/workspace",
+                    "bootstrapMaxChars": 30000,
+                    "bootstrapTotalMaxChars": 80000
+                }
+            },
+            "gateway": {
+                "port": 18789,
+                "mode": "local",
+                "bind": "lan",
+                "auth": {
+                    "mode": "token",
+                    "token": gateway_token
+                },
+                "controlUi": {
+                    "allowInsecureAuth": True
+                }
+            }
+        }
+        (config_dir / "openclaw.json").write_text(json.dumps(oc_config, indent=2))
+
+        # Write IDENTITY.md linked to wallet
+        (workspace_dir / "IDENTITY.md").write_text(
+            f"# Identity\n\n- **Wallet:** `{pubkey}`\n- **Instance:** `{iid}`\n- **Created:** {time.strftime('%Y-%m-%d %H:%M:%S UTC', time.gmtime())}\n"
+        )
+
         cname = container_name(iid)
-        status = get_container_status(cname)
-        if status == "docker_unreachable":
-            return jsonify(docker_unreachable_error()), 503
-        if status == "running":
-            return jsonify({
-                "error": "Instance already running",
-                "instance": {**existing, "id": iid, "status": status}
-            }), 409
-        # Exists but stopped — restart it
+
+        # Launch container
         try:
             client = docker_client()
-            container = client.containers.get(cname)
-            container.start()
-            time.sleep(2)
-            existing["status"] = get_container_status(cname)
-            existing["last_started"] = int(time.time())
-            save_db(db)
-            return jsonify({"instance": {**existing, "id": iid}})
-        except NotFound:
-            return jsonify({"error": "Container not found"}), 404
+            container = client.containers.run(
+                image=OPENCLAW_IMAGE,
+                name=cname,
+                detach=True,
+                restart_policy={"Name": "unless-stopped"},
+                init=True,
+                # Drop all capabilities, add only what openclaw needs
+                cap_drop=["ALL"],
+                cap_add=["NET_BIND_SERVICE"],
+                # Prevent privilege escalation via SUID/SGID binaries
+                security_opt=["no-new-privileges"],
+                environment={
+                    "HOME": "/home/node",
+                    "TERM": "xterm-256color",
+                    "OPENCLAW_GATEWAY_TOKEN": gateway_token
+                },
+                volumes={
+                    str(config_dir): {"bind": "/home/node/.openclaw", "mode": "rw"},
+                    str(workspace_dir): {"bind": "/home/node/.openclaw/workspace", "mode": "rw"}
+                },
+                # Bind only to Tailscale IP — not reachable from LAN
+                ports={"18789/tcp": (TAILSCALE_IP, port)},
+                # Resource limits per instance
+                mem_limit="512m",
+                memswap_limit="512m",
+                nano_cpus=500_000_000,  # 0.5 CPU
+                command=["node", "dist/index.js", "gateway", "--bind", "lan", "--port", "18789"]
+            )
+        except APIError as e:
+            return jsonify({"error": f"Docker launch failed: {str(e)[:500]}"}), 500
         except DockerException:
             return jsonify(docker_unreachable_error()), 503
 
-    if len(db["instances"]) >= MAX_INSTANCES:
-        return jsonify({"error": f"Maximum {MAX_INSTANCES} instances reached"}), 429
-
-    # Create new instance
-    port = get_next_port(db)
-    gateway_token = secrets.token_hex(24)
-    instance_dir = INSTANCES_DIR / iid
-    config_dir = instance_dir / "config"
-    workspace_dir = instance_dir / "workspace"
-    config_dir.mkdir(parents=True, exist_ok=True)
-    workspace_dir.mkdir(parents=True, exist_ok=True)
-
-    # Seed workspace from templates/workspace/ if it exists
-    try:
-        tmpl_dir = BASE_DIR / "templates" / "workspace"
-        if tmpl_dir.exists():
-            for src in tmpl_dir.iterdir():
-                if src.is_file():
-                    dest = workspace_dir / src.name
-                    if not dest.exists():  # don't overwrite on restart
-                        shutil.copy2(src, dest)
-    except Exception:
-        pass  # never break a deploy over missing templates
-
-    # Write minimal openclaw config
-    oc_config = {
-        "agents": {
-            "defaults": {
-                "workspace": "/home/node/.openclaw/workspace",
-                "bootstrapMaxChars": 30000,
-                "bootstrapTotalMaxChars": 80000
-            }
-        },
-        "gateway": {
-            "port": 18789,
-            "mode": "local",
-            "bind": "lan",
-            "auth": {
-                "mode": "token",
-                "token": gateway_token
-            },
-            "controlUi": {
-                "allowInsecureAuth": True
-            }
+        instance_data = {
+            "pubkey": pubkey,
+            "port": port,
+            "gateway_token": gateway_token,
+            "created": int(time.time()),
+            "last_started": int(time.time()),
+            "container_id": container.id[:12]
         }
-    }
-    (config_dir / "openclaw.json").write_text(json.dumps(oc_config, indent=2))
+        db["instances"][iid] = instance_data
 
-    # Write IDENTITY.md linked to wallet
-    (workspace_dir / "IDENTITY.md").write_text(
-        f"# Identity\n\n- **Wallet:** `{pubkey}`\n- **Instance:** `{iid}`\n- **Created:** {time.strftime('%Y-%m-%d %H:%M:%S UTC', time.gmtime())}\n"
-    )
-
-    cname = container_name(iid)
-
-    # Tailscale IP — bind ports here so instances are only reachable via Tailscale
-    TAILSCALE_IP = "100.118.141.107"
-
-    # Launch container
-    try:
-        client = docker_client()
-        container = client.containers.run(
-            image=OPENCLAW_IMAGE,
-            name=cname,
-            detach=True,
-            restart_policy={"Name": "unless-stopped"},
-            init=True,
-            # Drop all capabilities, add only what openclaw needs
-            cap_drop=["ALL"],
-            cap_add=["NET_BIND_SERVICE"],
-            # Prevent privilege escalation via SUID/SGID binaries
-            security_opt=["no-new-privileges"],
-            environment={
-                "HOME": "/home/node",
-                "TERM": "xterm-256color",
-                "OPENCLAW_GATEWAY_TOKEN": gateway_token
-            },
-            volumes={
-                str(config_dir): {"bind": "/home/node/.openclaw", "mode": "rw"},
-                str(workspace_dir): {"bind": "/home/node/.openclaw/workspace", "mode": "rw"}
-            },
-            # Bind only to Tailscale IP — not reachable from LAN
-            ports={"18789/tcp": (TAILSCALE_IP, port)},
-            # Resource limits per instance
-            mem_limit="512m",
-            memswap_limit="512m",
-            nano_cpus=500_000_000,  # 0.5 CPU
-            command=["node", "dist/index.js", "gateway", "--bind", "lan", "--port", "18789"]
-        )
-    except APIError as e:
-        return jsonify({"error": f"Docker launch failed: {str(e)[:500]}"}), 500
-    except DockerException:
-        return jsonify(docker_unreachable_error()), 503
-
-    instance_data = {
-        "pubkey": pubkey,
-        "port": port,
-        "gateway_token": gateway_token,
-        "created": int(time.time()),
-        "last_started": int(time.time()),
-        "container_id": container.id[:12]
-    }
-    db["instances"][iid] = instance_data
-    save_db(db)
-
+    # gateway_token IS returned on launch so the caller can configure the dashboard link
     return jsonify({"instance": {**instance_data, "id": iid, "status": "starting"}})
 
 
@@ -332,7 +406,6 @@ def destroy_instance():
     if not pubkey:
         return jsonify({"error": "Missing pubkey"}), 400
 
-    db = load_db()
     iid = wallet_to_id(pubkey)
     cname = container_name(iid)
 
@@ -349,9 +422,9 @@ def destroy_instance():
     except DockerException:
         return jsonify(docker_unreachable_error()), 503
 
-    if iid in db["instances"]:
-        del db["instances"][iid]
-        save_db(db)
+    with locked_db() as db:
+        if iid in db["instances"]:
+            del db["instances"][iid]
 
     return jsonify({"status": "destroyed", "id": iid})
 
@@ -369,11 +442,15 @@ def instance_stats(instance_id):
 @app.route("/api/logs/<instance_id>", methods=["GET"])
 def instance_logs(instance_id):
     cname = container_name(instance_id)
-    lines = request.args.get("lines", "50")
+    try:
+        lines = int(request.args.get("lines", "50"))
+    except ValueError:
+        lines = 50
+    lines = min(max(lines, 1), 500)  # clamp to [1, 500]
     try:
         client = docker_client()
         container = client.containers.get(cname)
-        logs = container.logs(tail=int(lines))
+        logs = container.logs(tail=lines)
         text = logs.decode("utf-8", errors="replace")
         return jsonify({"logs": text[-5000:]})
     except NotFound:
@@ -387,6 +464,7 @@ def _safe_filename(filename: str) -> bool:
     return (
         filename.endswith((".md", ".json"))
         and "/" not in filename
+        and "\\" not in filename
         and ".." not in filename
         and len(filename) <= 64
     )
@@ -422,10 +500,12 @@ def write_file(iid, filename):
     db = load_db()
     if iid not in db["instances"]:
         return jsonify({"error": "Instance not found"}), 404
+    path = INSTANCES_DIR / iid / "workspace" / filename
+    # Only allow editing existing files — no new file creation via API
+    if not path.exists():
+        return jsonify({"error": "Cannot create new files, only edit existing ones"}), 403
     data = request.json or {}
     content = data.get("content", "")
-    path = INSTANCES_DIR / iid / "workspace" / filename
-    path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(content)
     return jsonify({"ok": True})
 
