@@ -170,7 +170,7 @@ app.get("/api/instances", (_req, res) => {
   const instances = Object.entries(db.instances).map(([iid, inst]) => {
     const status = cachedStatus(iid);
     // Return a copy without gateway_token (sensitive credential)
-    const { gateway_token, ...safe } = inst;
+    const { gateway_token, telegram_bot_token, ...safe } = inst;
     return { ...safe, id: iid, status };
   });
   res.json({ instances });
@@ -179,6 +179,7 @@ app.get("/api/instances", (_req, res) => {
 // Launch (or restart) an instance
 app.post("/api/launch", async (req, res) => {
   const pubkey = (req.body?.pubkey || "").trim();
+  const telegramBotToken = (req.body?.telegram_bot_token || "").trim() || undefined;
 
   if (!pubkey || pubkey.length < 32 || pubkey.length > 64) {
     res.status(400).json({ error: "Invalid wallet public key" });
@@ -353,8 +354,9 @@ app.post("/api/launch", async (req, res) => {
           },
         },
       };
-      // Add Telegram if bot token is configured
-      if (process.env.TELEGRAM_BOT_TOKEN) {
+      // Add Telegram if bot token is configured (per-instance or global)
+      const tgToken = telegramBotToken || process.env.TELEGRAM_BOT_TOKEN;
+      if (tgToken) {
         ocConfig.channels = {
           telegram: {
             dmPolicy: "open",
@@ -391,6 +393,7 @@ app.post("/api/launch", async (req, res) => {
           name: cname,
           port,
           gatewayToken,
+          telegramBotToken,
           configDir,
           workspaceDir,
         });
@@ -402,6 +405,7 @@ app.post("/api/launch", async (req, res) => {
           pubkey,
           port,
           gateway_token: gatewayToken,
+          telegram_bot_token: telegramBotToken,
           created: Math.floor(Date.now() / 1000),
           last_started: Math.floor(Date.now() / 1000),
           container_id: containerId,

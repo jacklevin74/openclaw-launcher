@@ -92,6 +92,7 @@ export interface LaunchParams {
   name: string;
   port: number;
   gatewayToken: string;
+  telegramBotToken?: string;
   configDir: string;
   workspaceDir: string;
 }
@@ -113,7 +114,7 @@ export async function launchContainer(params: LaunchParams): Promise<Dockerode.C
       ...(process.env.OPENROUTER_API_KEY ? [`OC_OPENROUTER_KEY=${process.env.OPENROUTER_API_KEY}`] : []),
       ...(process.env.ANTHROPIC_API_KEY ? [`OC_ANTHROPIC_KEY=${process.env.ANTHROPIC_API_KEY}`] : []),
       ...(process.env.OLLAMA_API_KEY ? [`OC_OLLAMA_KEY=${process.env.OLLAMA_API_KEY}`] : []),
-      ...(process.env.TELEGRAM_BOT_TOKEN ? [`TELEGRAM_BOT_TOKEN=${process.env.TELEGRAM_BOT_TOKEN}`] : []),
+      ...((params.telegramBotToken || process.env.TELEGRAM_BOT_TOKEN) ? [`TELEGRAM_BOT_TOKEN=${params.telegramBotToken || process.env.TELEGRAM_BOT_TOKEN}`] : []),
       ...(process.env.OPENAI_API_KEY ? [`OC_OPENAI_KEY=${process.env.OPENAI_API_KEY}`] : []),
     ],
     ExposedPorts: { "18789/tcp": {} },

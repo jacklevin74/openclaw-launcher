@@ -13,6 +13,7 @@ export interface Instance {
   pubkey: string;
   port: number;
   gateway_token: string;
+  telegram_bot_token?: string;
   created: number;
   last_started: number;
   container_id: string;

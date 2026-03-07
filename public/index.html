@@ -409,7 +409,8 @@
   <div class="launch-panel">
     <h2>Deploy New Instance</h2>
     <div class="launch-row">
-      <input type="text" id="pubkey-input" placeholder="Enter SVM wallet public key (e.g. 2jchoLFVoxmJUcygc2cDfAqQb1yWUEjJihsw2ARbDRy3)" maxlength="64" />
+      <input type="text" id="pubkey-input" placeholder="SVM wallet public key" maxlength="64" style="flex:2" />
+      <input type="text" id="tg-token-input" placeholder="Telegram bot token (optional)" maxlength="128" style="flex:1" />
       <button class="btn btn-primary" id="launch-btn" onclick="launchInstance()">Deploy</button>
     </div>
   </div>
@@ -531,8 +532,10 @@ function renderInstances(instances) {
 
 async function launchInstance() {
   const input = document.getElementById("pubkey-input");
+  const tgInput = document.getElementById("tg-token-input");
   const btn = document.getElementById("launch-btn");
   const pubkey = input.value.trim();
+  const tgToken = tgInput.value.trim();
 
   if (!pubkey || pubkey.length < 32) {
     toast("Enter a valid SVM wallet public key (32-44 chars)", "error");
@@ -543,9 +546,11 @@ async function launchInstance() {
   btn.textContent = "Deploying…";
 
   try {
+    const body = { pubkey };
+    if (tgToken) body.telegram_bot_token = tgToken;
     const res = await apiFetch(`${HOST}/api/launch`, {
       method: "POST",
-      body: JSON.stringify({ pubkey })
+      body: JSON.stringify(body)
     });
     const data = await res.json();
     if (data.error) {
@@ -553,6 +558,7 @@ async function launchInstance() {
     } else {
       toast(`Instance deployed on port ${data.instance.port}`);
       input.value = "";
+      tgInput.value = "";
       fetchInstances();
     }
   } catch (e) {
@@ -818,6 +824,9 @@ refreshInterval = setInterval(fetchInstances, 5000);
 
 // Enter key
 document.getElementById("pubkey-input").addEventListener("keydown", e => {
+  if (e.key === "Enter") launchInstance();
+});
+document.getElementById("tg-token-input").addEventListener("keydown", e => {
   if (e.key === "Enter") launchInstance();
 });
 </script>
