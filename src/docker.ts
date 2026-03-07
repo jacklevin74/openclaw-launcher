@@ -108,6 +108,13 @@ export async function launchContainer(params: LaunchParams): Promise<Dockerode.C
       `HOME=/home/node`,
       `TERM=xterm-256color`,
       `OPENCLAW_GATEWAY_TOKEN=${params.gatewayToken}`,
+      // Use non-standard env var names to prevent openclaw auto-discovery of providers.
+      // The explicit provider config references these via apiKey fields.
+      ...(process.env.OPENROUTER_API_KEY ? [`OC_OPENROUTER_KEY=${process.env.OPENROUTER_API_KEY}`] : []),
+      ...(process.env.ANTHROPIC_API_KEY ? [`OC_ANTHROPIC_KEY=${process.env.ANTHROPIC_API_KEY}`] : []),
+      ...(process.env.OLLAMA_API_KEY ? [`OC_OLLAMA_KEY=${process.env.OLLAMA_API_KEY}`] : []),
+      ...(process.env.TELEGRAM_BOT_TOKEN ? [`TELEGRAM_BOT_TOKEN=${process.env.TELEGRAM_BOT_TOKEN}`] : []),
+      ...(process.env.OPENAI_API_KEY ? [`OC_OPENAI_KEY=${process.env.OPENAI_API_KEY}`] : []),
     ],
     ExposedPorts: { "18789/tcp": {} },
     HostConfig: {

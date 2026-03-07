@@ -8,7 +8,7 @@
 import express from "express";
 import { createServer } from "node:http";
 import { WebSocketServer, WebSocket } from "ws";
-import { readFileSync, existsSync, mkdirSync, readdirSync, writeFileSync, copyFileSync } from "node:fs";
+import { readFileSync, existsSync, mkdirSync, readdirSync, writeFileSync, copyFileSync, chownSync } from "node:fs";
 import { resolve, join } from "node:path";
 import { randomBytes } from "node:crypto";
 import { Marked } from "marked";
@@ -249,17 +249,71 @@ app.post("/api/launch", async (req, res) => {
       mkdirSync(configDir, { recursive: true });
       mkdirSync(workspaceDir, { recursive: true });
 
+      // Ensure container user (node, uid 1000) owns instance dirs
+      const CONTAINER_UID = 1000;
+      const CONTAINER_GID = 1000;
+      chownSync(instanceDir, CONTAINER_UID, CONTAINER_GID);
+      chownSync(configDir, CONTAINER_UID, CONTAINER_GID);
+      chownSync(workspaceDir, CONTAINER_UID, CONTAINER_GID);
+
       // Seed workspace from templates
       seedWorkspace(workspaceDir);
 
-      // Write minimal openclaw config
-      const ocConfig = {
+      // Write openclaw config with multi-model + Telegram
+      const ocConfig: Record<string, any> = {
+        models: {
+          mode: "replace",
+          providers: {
+            ollama: {
+              baseUrl: "https://ai.puter.to/v1",
+              auth: "api-key",
+              apiKey: { source: "env", provider: "default", id: "OC_OLLAMA_KEY" },
+              api: "openai-responses",
+              models: [
+                {
+                  id: "kimi-k2.5:cloud",
+                  name: "Kimi K2.5",
+                  contextWindow: 131072,
+                  maxTokens: 8192,
+                  cost: { input: 0, output: 0 },
+                },
+              ],
+            },
+            anthropic: {
+              baseUrl: "https://api.anthropic.com",
+              apiKey: { source: "env", provider: "default", id: "OC_ANTHROPIC_KEY" },
+              api: "anthropic-messages",
+              models: [
+                { id: "claude-sonnet-4-6", name: "Claude Sonnet 4.6" },
+              ],
+            },
+          },
+        },
         agents: {
           defaults: {
+            model: {
+              primary: "ollama/kimi-k2.5:cloud",
+              fallbacks: ["anthropic/claude-sonnet-4-6"],
+            },
+            models: {
+              "ollama/kimi-k2.5:cloud": {},
+              "anthropic/claude-sonnet-4-6": {},
+            },
             workspace: "/home/node/.openclaw/workspace",
             bootstrapMaxChars: 30000,
             bootstrapTotalMaxChars: 80000,
+            subagents: {
+              maxConcurrent: 4,
+              model: "anthropic/claude-sonnet-4-6",
+            },
           },
+        },
+        commands: {
+          native: "auto",
+          nativeSkills: "auto",
+          config: false,
+          restart: true,
+          ownerDisplay: "raw",
         },
         gateway: {
           port: 18789,
@@ -271,20 +325,45 @@ app.post("/api/launch", async (req, res) => {
           },
           controlUi: {
             allowInsecureAuth: true,
+            dangerouslyDisableDeviceAuth: true,
+            allowedOrigins: [
+              "http://localhost:18789",
+              "http://127.0.0.1:18789",
+              `http://${TAILSCALE_IP}:${port}`,
+            ],
           },
         },
       };
-      writeFileSync(
-        join(configDir, "openclaw.json"),
-        JSON.stringify(ocConfig, null, 2)
-      );
+      // Add Telegram if bot token is configured
+      if (process.env.TELEGRAM_BOT_TOKEN) {
+        ocConfig.channels = {
+          telegram: {
+            dmPolicy: "open",
+            allowFrom: ["*"],
+            configWrites: false,
+            accounts: {
+              default: {
+                botToken: { source: "env", provider: "default", id: "TELEGRAM_BOT_TOKEN" },
+                dmPolicy: "open",
+                allowFrom: ["*"],
+                configWrites: false,
+              },
+            },
+          },
+        };
+      }
+      const configPath = join(configDir, "openclaw.json");
+      writeFileSync(configPath, JSON.stringify(ocConfig, null, 2));
+      chownSync(configPath, CONTAINER_UID, CONTAINER_GID);
 
       // Write IDENTITY.md linked to wallet
       const now = new Date().toISOString().replace("T", " ").slice(0, 19) + " UTC";
+      const identityPath = join(workspaceDir, "IDENTITY.md");
       writeFileSync(
-        join(workspaceDir, "IDENTITY.md"),
+        identityPath,
         `# Identity\n\n- **Wallet:** \`${pubkey}\`\n- **Instance:** \`${iid}\`\n- **Created:** ${now}\n`
       );
+      chownSync(identityPath, CONTAINER_UID, CONTAINER_GID);
 
       // Launch container
       const cname = containerName(iid);

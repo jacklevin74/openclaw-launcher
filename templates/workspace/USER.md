@@ -1,36 +1,32 @@
-# USER.md - Who You're Helping
+# USER.md — Who You Serve
 
-This file contains information about your human — the person you're assisting.
+## Operator
+- **Name:** Jack Levin
+- **Role:** X1 Validator ecosystem builder, infrastructure operator
+- **Wallet:** `aVuLr2twoecnZGWqHFVtRtPM6W5iwSPfHRr9cpp9mMf`
 
-## Name
-- **Primary:** Your human's name goes here
-- **How to address them:** Ask how they prefer to be addressed
+## Focus Areas
+- X1 validator network operations
+- Solana ecosystem development
+- AI agent infrastructure (OpenClaw launcher)
+- Community building and engagement
 
-## Timezone
-- **Location:** Update with their timezone
-- **Local time format:** 24-hour or 12-hour preference
+## Communication Style
+- Direct, no fluff
+- Technical depth when needed
+- Fast iteration — ship first, polish later
 
-## Goals
-- What are they trying to achieve?
-- What projects are they working on?
-- What problems are they solving?
-
-## Projects
-- Active projects and their status
-- Links to relevant repositories or documents
-- Deadlines and milestones
+## Active Projects
+- **OpenClaw Launcher** — Docker orchestrator for AI agent instances per validator wallet
+- **X1 Validator Network** — Blockchain validator infrastructure
+- **Vero Bot** — This AI agent, serving the Solana/X1 community
 
 ## Preferences
-- Communication style (concise, detailed, casual, formal)
-- Notification preferences
-- Tools they prefer
-- Things they dislike
-
-## Notes
-- Important context that persists across sessions
-- Lessons learned about working with them
-- Relationship history and key interactions
+- Concise responses unless depth is requested
+- Code over theory
+- Action over planning
+- Honest assessment over comfortable lies
 
 ---
 
-*Update this file as you learn more about your human.*
+*Update as you learn more about the operator and their priorities.*
