@@ -1,0 +1,13 @@
+FROM openclaw:local AS base
+
+FROM base AS solana-install
+USER root
+RUN apt-get update && apt-get install -y --no-install-recommends curl ca-certificates bzip2 \
+    && curl -sSfL https://release.anza.xyz/v2.2.18/solana-release-x86_64-unknown-linux-gnu.tar.bz2 \
+       | tar xj -C /opt \
+    && apt-get purge -y curl bzip2 && apt-get autoremove -y && rm -rf /var/lib/apt/lists/*
+
+FROM base
+COPY --from=solana-install /opt/solana-release/bin/solana /usr/local/bin/solana
+COPY --from=solana-install /opt/solana-release/bin/solana-keygen /usr/local/bin/solana-keygen
+USER node

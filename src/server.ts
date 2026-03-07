@@ -285,6 +285,23 @@ app.post("/api/launch", async (req, res) => {
               api: "anthropic-messages",
               models: [
                 { id: "claude-sonnet-4-6", name: "Claude Sonnet 4.6" },
+                { id: "claude-haiku-4-5", name: "Claude Haiku 4.5" },
+              ],
+            },
+            openrouter: {
+              baseUrl: "https://openrouter.ai/api/v1",
+              apiKey: { source: "env", provider: "default", id: "OC_OPENROUTER_KEY" },
+              api: "openai-responses",
+              models: [
+                {
+                  id: "openai/gpt-5.3-codex",
+                  name: "GPT-5.3 Codex",
+                  reasoning: true,
+                  input: ["text", "image"],
+                  cost: { input: 0.000005, output: 0.000015 },
+                  contextWindow: 128000,
+                  maxTokens: 64000,
+                },
               ],
             },
           },
@@ -298,6 +315,8 @@ app.post("/api/launch", async (req, res) => {
             models: {
               "ollama/kimi-k2.5:cloud": {},
               "anthropic/claude-sonnet-4-6": {},
+              "anthropic/claude-haiku-4-5": {},
+              "openrouter/openai/gpt-5.3-codex": {},
             },
             workspace: "/home/node/.openclaw/workspace",
             bootstrapMaxChars: 30000,
