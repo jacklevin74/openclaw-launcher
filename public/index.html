@@ -190,7 +190,8 @@
     margin-top: 4px;
     display: flex;
     gap: 16px;
-    flex-wrap: wrap;
+    flex-wrap: nowrap;
+    overflow: hidden;
   }
 
   .instance-info .meta span { white-space: nowrap; }
@@ -476,6 +477,11 @@ async function fetchInstances() {
   }
 }
 
+// Snapshot of last rendered state to avoid unnecessary DOM rebuilds
+let _lastRenderKey = "";
+const _statsCache = {};
+let _statsFetchInFlight = false;
+
 function renderInstances(instances) {
   const total = instances.length;
   const running = instances.filter(i => i.status === "running").length;
@@ -485,49 +491,69 @@ function renderInstances(instances) {
   const container = document.getElementById("instances-container");
   if (!total) {
     container.innerHTML = `<div class="empty-state"><div class="icon">📦</div><p>No instances deployed yet. Enter a wallet public key to launch.</p></div>`;
+    _lastRenderKey = "";
     return;
   }
 
-  container.innerHTML = `<div class="instances-grid">${instances.map(inst => {
-    const statusClass = inst.status === "running" ? "running" : inst.status === "exited" ? "stopped" : inst.status;
-    return `
-      <div class="instance-card">
-        <div class="status-dot ${statusClass}"></div>
-        <div class="instance-info">
-          <div class="wallet" title="${inst.pubkey}">${inst.pubkey}</div>
-          <div class="meta">
-            <span><span class="label">ID:</span> ${inst.id}</span>
-            <span><span class="label">Port:</span> ${inst.port}</span>
-            <span><span class="label">Status:</span> ${inst.status}</span>
-            <span><span class="label">Created:</span> ${inst.created ? timeAgo(inst.created) : '—'}</span>
-            <span class="stats-cell" id="stats-${inst.id}" style="color:var(--cyan)"></span>
-          </div>
-        </div>
-        <div class="instance-actions">
-          ${inst.status === "running" ?
-            `<a class="dashboard-link" href="http://${location.hostname}:${inst.port}/" target="_blank">Dashboard</a>
-             <button class="btn-sm" onclick="openFileEditor('${inst.id}','${inst.pubkey}')">📝 Files</button>
-             <button class="btn-sm" onclick="viewLogs('${inst.id}')">Logs</button>
-             <button class="btn-danger" onclick="stopInstance('${inst.pubkey}')">Stop</button>` :
-            `<button class="btn btn-primary" style="padding:6px 14px;font-size:12px" onclick="relaunch('${inst.pubkey}')">Start</button>
-             <button class="btn-danger" onclick="destroyInstance('${inst.pubkey}')">Destroy</button>`
-          }
-        </div>
-      </div>`;
-  }).join("")}</div>`;
+  // Only rebuild DOM if instance list actually changed (ids or statuses)
+  const renderKey = instances.map(i => `${i.id}:${i.status}`).join("|");
+  if (renderKey !== _lastRenderKey) {
+    _lastRenderKey = renderKey;
+    container.innerHTML = `<div class="instances-grid">${instances.map(inst => cardHtml(inst)).join("")}</div>`;
+  }
 
-  // Fetch live stats for each running instance
-  instances.filter(i => i.status === "running").forEach(inst => {
+  // Update dynamic text in-place (no layout change)
+  instances.forEach(inst => {
+    const el = document.getElementById(`created-${inst.id}`);
+    if (el) el.textContent = inst.created ? timeAgo(inst.created) : '—';
+  });
+
+  // Fetch stats (don't stack requests)
+  if (_statsFetchInFlight) return;
+  const runningInsts = instances.filter(i => i.status === "running");
+  if (!runningInsts.length) return;
+  _statsFetchInFlight = true;
+  Promise.all(runningInsts.map(inst =>
     apiFetch(`${HOST}/api/stats/${inst.id}`)
       .then(r => r.json())
       .then(d => {
-        const el = document.getElementById(`stats-${inst.id}`);
-        if (el && d.stats && d.stats.cpu) {
-          el.textContent = `CPU: ${d.stats.cpu} · MEM: ${d.stats.mem}`;
+        if (d.stats && d.stats.cpu) {
+          _statsCache[inst.id] = `CPU: ${d.stats.cpu} · MEM: ${d.stats.mem}`;
         }
+        const el = document.getElementById(`stats-${inst.id}`);
+        if (el) el.textContent = _statsCache[inst.id] || '';
       })
-      .catch(() => {});
-  });
+      .catch(() => {})
+  )).finally(() => { _statsFetchInFlight = false; });
+}
+
+function cardHtml(inst) {
+  const statusClass = inst.status === "running" ? "running" : inst.status === "exited" ? "stopped" : inst.status;
+  const cached = _statsCache[inst.id] || '';
+  return `
+    <div class="instance-card" data-iid="${inst.id}">
+      <div class="status-dot ${statusClass}"></div>
+      <div class="instance-info">
+        <div class="wallet" title="${inst.pubkey}">${inst.pubkey}</div>
+        <div class="meta">
+          <span><span class="label">ID:</span> ${inst.id}</span>
+          <span><span class="label">Port:</span> ${inst.port}</span>
+          <span><span class="label">Status:</span> ${inst.status}</span>
+          <span><span class="label">Created:</span> <span id="created-${inst.id}">${inst.created ? timeAgo(inst.created) : '—'}</span></span>
+          <span id="stats-${inst.id}" style="color:var(--cyan);display:inline">${cached}</span>
+        </div>
+      </div>
+      <div class="instance-actions">
+        ${inst.status === "running" ?
+          `<a class="dashboard-link" href="http://${location.hostname}:${inst.port}/" target="_blank">Dashboard</a>
+           <button class="btn-sm" onclick="openFileEditor('${inst.id}','${inst.pubkey}')">📝 Files</button>
+           <button class="btn-sm" onclick="viewLogs('${inst.id}')">Logs</button>
+           <button class="btn-danger" onclick="stopInstance('${inst.pubkey}')">Stop</button>` :
+          `<button class="btn btn-primary" style="padding:6px 14px;font-size:12px" onclick="relaunch('${inst.pubkey}')">Start</button>
+           <button class="btn-danger" onclick="destroyInstance('${inst.pubkey}')">Destroy</button>`
+        }
+      </div>
+    </div>`;
 }
 
 async function launchInstance() {

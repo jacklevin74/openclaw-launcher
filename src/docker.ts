@@ -135,6 +135,12 @@ export async function launchContainer(params: LaunchParams): Promise<Dockerode.C
       Binds: [
         `${params.configDir}:/home/node/.openclaw:rw`,
         `${params.workspaceDir}:/home/node/.openclaw/workspace:rw`,
+        // Mount core identity files read-only so agent cannot modify them
+        ...["SOUL.md", "AGENTS.md", "IDENTITY.md", "USER.md"].flatMap(f => {
+          const hostPath = `${params.workspaceDir}/${f}`;
+          const containerPath = `/home/node/.openclaw/workspace/${f}`;
+          try { require("fs").accessSync(hostPath); return [`${hostPath}:${containerPath}:ro`]; } catch { return []; }
+        }),
       ],
     },
   });
