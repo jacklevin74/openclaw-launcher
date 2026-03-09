@@ -50,7 +50,7 @@ These files remain writable so the agent can update them during operation:
 
 | Resource | Limit |
 |----------|-------|
-| Memory | 512 MiB (hard, no swap) |
+| Memory | 2 GiB (with 1.5 GiB Node.js heap via NODE_OPTIONS) |
 | CPU | 0.5 cores |
 | Restart policy | `unless-stopped` |
 
@@ -73,7 +73,7 @@ OpenClaw's upstream `pi-coding-agent` library auto-discovers providers from stan
 |-------------|-------------------|---------|
 | `ANTHROPIC_API_KEY` | `OC_ANTHROPIC_KEY` | Anthropic API access |
 | `OPENROUTER_API_KEY` | `OC_OPENROUTER_KEY` | OpenRouter API access |
-| `OLLAMA_API_KEY` | `OC_OLLAMA_KEY` | Ollama/Puter.to API access |
+| `OLLAMA_API_KEY` | `OC_OLLAMA_KEY` | Ollama (local instance) API access |
 | `OPENAI_API_KEY` | `OC_OPENAI_KEY` | OpenAI API access |
 
 The openclaw config references these via explicit `apiKey` fields:
@@ -150,10 +150,10 @@ openclaw-launcher/
 
 ## Instance Lifecycle
 
-1. **Launch** (`POST /api/launch`): Accepts `pubkey` and optional `telegram_bot_token`. Creates instance directory, writes config from template, seeds workspace from templates, launches container.
+1. **Launch** (`POST /api/launch`): Accepts `pubkey`, optional `name`, and optional `telegram_bot_token`. Creates instance directory, writes config from template, seeds workspace from templates (replacing `{{AGENT_NAME}}`), launches container.
 2. **Stop** (`POST /api/stop`): Stops container, preserves all data.
 3. **Start** (re-launch existing): Starts stopped container with existing config.
-4. **Destroy** (`POST /api/destroy`): Removes container and DB entry. Workspace files remain on disk.
+4. **Destroy** (`POST /api/destroy`): Removes container, DB entry, and wipes instance directory for clean redeploy.
 
 ## Gateway Access
 

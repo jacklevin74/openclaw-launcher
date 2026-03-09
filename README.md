@@ -1,80 +1,22 @@
 # OpenClaw Launcher
 
-**Wallet-Linked Docker Orchestrator for X1 Validator AI Agents**
+**Docker Orchestrator for AI Agent Instances — One Agent Per Wallet**
 
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-[![GitHub](https://img.shields.io/badge/GitHub-jacklevin74%2Fopenclaw--launcher-blue)](https://github.com/jacklevin74/openclaw-launcher)
-
-Deploy isolated OpenClaw instances tied to SVM wallet public keys. Each validator gets their own personal AI agent with dedicated resources, configuration, and workspace.
+Deploy isolated [OpenClaw](https://github.com/openclaw/openclaw) AI agents tied to SVM wallet public keys. Each validator gets a personal AI agent with dedicated resources, personality, Telegram bot, and workspace.
 
 ---
 
-## Overview
-
-**What it does:**
-- Deploys unique OpenClaw instances per wallet address
-- Each instance runs in an isolated, hardened Docker container
-- Automatic resource management (CPU, memory, ports)
-- Web UI for deployment and monitoring
-- Real-time log streaming via WebSocket
-- Prometheus metrics endpoint
-- Health reconciler with automatic state tracking
-- Maximum 20 concurrent instances (configurable)
-
-**Use case:**
-X1 validators can spin up their own AI agent without manual OpenClaw setup. Your wallet is your identity — deploy once, access anywhere.
-
-**Stack:** TypeScript, Express, WebSocket (ws), Dockerode, Node.js 24
-
----
-
-## For End Users (Validators)
-
-### How to Deploy Your Agent
-
-1. **Visit the launcher:**
-   `http://jack-nucbox-m6-ultra.tail515dc.ts.net:8780/`
-   *(Click "📖 Docs" in the header to view this guide)*
-
-2. **Enter your X1/Solana wallet public key**
-   Example: `aVuLr2twoecnZGWqHFVtRtPM6W5iwSPfHRr9cpp9mMf`
-
-3. **Click "Deploy"**
-   - System creates a unique instance ID (hash of your pubkey)
-   - Spins up Docker container
-   - Assigns dedicated port (19000+)
-   - Generates gateway auth token
-
-4. **Access your agent:**
-   - **URL:** `http://jack-nucbox-m6-ultra.tail515dc.ts.net:[PORT]/`
-   - **Token:** Shown in instance details
-   - **Web UI:** `http://...[PORT]/?token=[YOUR_TOKEN]`
-
-### Instance Management
-
-- Use the web UI to start/stop your instance
-- Stopped instances preserve all data (workspace, config, memory)
-- Restart anytime with same wallet address
-- Live logs via WebSocket streaming in the UI
-
-**Your Data:**
-- **Workspace:** `data/instances/[INSTANCE_ID]/workspace/`
-- **Config:** `data/instances/[INSTANCE_ID]/config/`
-- **Persistent:** Survives container restarts
-
----
-
-## For Operators
+## Quick Start (Operator Setup)
 
 ### Prerequisites
 
-- Linux host (tested on Ubuntu)
+- Linux host (Ubuntu recommended)
 - Docker installed and running
 - Node.js 20+ (24 recommended)
-- 32GB+ RAM recommended for multiple instances
-- 500GB+ storage
+- Ollama installed (for free cloud models — no GPU needed)
+- API keys for at least one LLM provider
 
-### Installation
+### 1. Clone and install
 
 ```bash
 git clone https://github.com/jacklevin74/openclaw-launcher.git
@@ -82,305 +24,264 @@ cd openclaw-launcher
 npm install
 ```
 
-**Build the OpenClaw Docker image first:**
+### 2. Build the Docker image
+
+The launcher needs an `openclaw:local` Docker image. Build it in two steps:
+
 ```bash
-docker build -t openclaw:local /path/to/openclaw
+# Step 1: Base image with latest OpenClaw
+cat > /tmp/Dockerfile.openclaw <<'EOF'
+FROM node:22-slim
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    git curl ca-certificates python3 \
+    && rm -rf /var/lib/apt/lists/*
+RUN npm install -g openclaw@latest
+USER node
+WORKDIR /home/node
+RUN mkdir -p .openclaw/workspace
+EXPOSE 18789
+CMD ["openclaw", "gateway", "run"]
+EOF
+docker build -t openclaw:base -f /tmp/Dockerfile.openclaw /tmp/
+
+# Step 2: Add Solana CLI tools (optional, for onchain agents)
+docker build -t openclaw:local -f Dockerfile.openclaw .
 ```
 
-### Configuration
+### 3. Set up Ollama (free cloud models, no GPU)
 
-Create a `.env` file:
 ```bash
-LAUNCHER_TOKEN=your-secret-token-here    # Required for API auth
-TAILSCALE_IP=100.118.141.107             # Optional, default shown
-PORT=8780                                # Optional, default 8780
+curl -fsSL https://ollama.com/install.sh | sh
 ```
 
-**Constants** (edit `src/server.ts`):
-```typescript
-const BASE_PORT = 19000;        // First instance port
-const MAX_INSTANCES = 20;       // Safety limit
-```
-
-**Image name** (edit `src/docker.ts`):
-```typescript
-export const OPENCLAW_IMAGE = "openclaw:local";
-```
-
-### Running
-
-**Development:**
+If port 11434 is in use, bind to a different port:
 ```bash
-npm run dev
+sudo mkdir -p /etc/systemd/system/ollama.service.d
+echo -e '[Service]\nEnvironment="OLLAMA_HOST=0.0.0.0:11435"' | \
+  sudo tee /etc/systemd/system/ollama.service.d/override.conf
+sudo systemctl daemon-reload && sudo systemctl restart ollama
 ```
 
-**Production:**
+Create an account at [ollama.com](https://ollama.com), add your server's public key (found in the ollama startup logs), then test:
+```bash
+OLLAMA_HOST=http://127.0.0.1:11435 ollama run kimi-k2.5:cloud "hello"
+```
+
+### 4. Configure environment
+
+Create `.env`:
+```bash
+# Required
+LAUNCHER_TOKEN=your-secret-launcher-token
+
+# LLM Provider API Keys (at least one required)
+ANTHROPIC_API_KEY=sk-ant-...          # Claude models
+OPENROUTER_API_KEY=sk-or-v1-...      # OpenRouter models
+OLLAMA_API_KEY=ollama-local           # For local ollama (any non-empty value)
+
+# Optional
+TELEGRAM_BOT_TOKEN=...               # Default Telegram bot (per-instance tokens override)
+TAILSCALE_IP=100.x.x.x              # Bind address for instance ports
+PORT=8780                            # Launcher web UI port
+```
+
+### 5. Build and run
+
 ```bash
 npm run build
-npm start
+sudo env $(grep -v '^#' .env | xargs) node dist/server.js
 ```
 
-**With Docker Compose:**
+Access the web UI at `http://your-server:8780/?token=your-secret-launcher-token`
+
+---
+
+## Deploying an Agent
+
+### Via Web UI
+
+1. Open the launcher dashboard
+2. Enter an **agent name** (e.g., "Theo"), **wallet public key**, and optionally a **Telegram bot token**
+3. Click **Deploy**
+4. The agent gets its own container, port, config, and personality
+
+### Via API
+
 ```bash
-docker compose up -d
+curl -X POST http://localhost:8780/api/launch \
+  -H "Authorization: Bearer $LAUNCHER_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"pubkey": "YOUR_WALLET_PUBKEY", "name": "Theo", "telegram_bot_token": "optional"}'
 ```
 
-**Access:** `http://localhost:8780/?token=your-secret-token-here`
+### What happens on deploy
+
+1. Instance ID generated from `sha256(pubkey)[:12]`
+2. Directories created: `data/instances/<id>/config/` and `workspace/`
+3. Template files copied to workspace with `{{AGENT_NAME}}` replaced
+4. OpenClaw config written with model providers and Telegram setup
+5. Docker container launched with security hardening
+6. Agent connects to Telegram and starts responding
+
+---
+
+## Agent Personality & Templates
+
+Templates live in `templates/workspace/`. Each new agent gets these files seeded into their workspace:
+
+| File | Purpose | Mutable by Agent |
+|------|---------|-----------------|
+| `SOUL.md` | Core personality, voice, values | No (read-only mount) |
+| `IDENTITY.md` | Wallet binding, instance metadata | No (read-only mount) |
+| `AGENTS.md` | Behavioral rules and policies | No (read-only mount) |
+| `USER.md` | Operator profile | No (read-only mount) |
+| `MEMORY.md` | Long-term knowledge, ecosystem data | Yes |
+| `HEARTBEAT.md` | Periodic task config | Yes |
+| `TOOLS.md` | Infrastructure notes | Yes |
+
+Templates use `{{AGENT_NAME}}` as a placeholder — replaced with the actual name on deploy.
+
+Protected files are bind-mounted as `:ro` at the Docker level, so agents cannot modify their own identity regardless of instructions or prompt injection.
+
+---
+
+## Model Configuration
+
+The launcher configures agents with multiple LLM providers:
+
+| Provider | Model | Notes |
+|----------|-------|-------|
+| Ollama (local) | `kimi-k2.5:cloud` | Free via ollama.com cloud — primary model |
+| Anthropic | `claude-sonnet-4-6` | Fallback, also used for subagents |
+| Anthropic | `claude-haiku-4-5` | Fast/cheap option |
+| OpenRouter | `openai/gpt-5.3-codex` | Additional option |
+
+The ollama provider points at `http://172.17.0.1:<port>/v1` (Docker bridge gateway) so containers reach the host's ollama instance.
+
+**Anti-auto-discovery:** API keys use non-standard env var names (`OC_ANTHROPIC_KEY`, `OC_OLLAMA_KEY`, etc.) to prevent OpenClaw's built-in model catalog from auto-registering hundreds of models. Only models in the `agents.defaults.models` allowlist are selectable.
+
+---
+
+## Container Security
+
+Each agent runs in a hardened Docker container:
+
+| Setting | Value |
+|---------|-------|
+| Memory | 2 GB (with 1.5 GB Node.js heap) |
+| CPU | 0.5 cores |
+| Capabilities | `ALL` dropped, only `NET_BIND_SERVICE` added |
+| Privilege escalation | Blocked (`no-new-privileges`) |
+| Restart policy | `unless-stopped` |
+| Init | `true` (proper PID 1) |
+| Port binding | Specific IP only (not 0.0.0.0) |
+| Protected files | Read-only bind mounts for identity files |
 
 ---
 
 ## Architecture
 
-### Project Structure
-
 ```
 openclaw-launcher/
 ├── src/
-│   ├── server.ts       # Express app, routes, WebSocket setup
-│   ├── auth.ts         # Bearer token middleware + WS auth
-│   ├── db.ts           # File-locked JSON database
-│   ├── docker.ts       # Container lifecycle (launch, stop, destroy, logs, stats)
-│   ├── reconciler.ts   # Health reconciler (60s interval)
-│   └── metrics.ts      # Prometheus metrics formatter
+│   ├── server.ts          # Express server, routes, config template
+│   ├── docker.ts          # Container lifecycle, security config
+│   ├── auth.ts            # Bearer token middleware
+│   ├── db.ts              # JSON database with file locking
+│   ├── reconciler.ts      # Health polling (60s interval)
+│   └── metrics.ts         # Prometheus metrics
 ├── public/
-│   ├── index.html      # Frontend SPA (dark cyberpunk theme)
-│   └── docs.html       # Documentation page template
-├── templates/
-│   └── workspace/      # Seed files for new instances
-├── package.json
-├── tsconfig.json
-├── Dockerfile
-└── docker-compose.yml
+│   └── index.html         # Web UI dashboard
+├── templates/workspace/   # Template .md files for new agents
+├── data/
+│   ├── instances.json     # Instance database
+│   └── instances/<id>/    # Per-instance data
+│       ├── config/        # openclaw.json
+│       └── workspace/     # SOUL.md, MEMORY.md, etc.
+├── Dockerfile.openclaw    # Extended image with Solana CLI
+└── .env                   # API keys, tokens (gitignored)
 ```
 
-### Instance Creation Flow
+### Instance Lifecycle
 
-```
-User submits wallet pubkey
-   ↓
-Generate instance ID: sha256(pubkey)[:12]
-   ↓
-Create directories:
-   - data/instances/[ID]/config/
-   - data/instances/[ID]/workspace/
-   ↓
-Seed workspace from templates/workspace/
-   ↓
-Generate gateway token (48 hex chars)
-   ↓
-Write openclaw.json config
-   ↓
-Docker create + start (hardened container)
-   ↓
-Update instances.json (file-locked)
-   ↓
-Return instance details + token to user
-```
+| Action | Endpoint | Effect |
+|--------|----------|--------|
+| **Deploy** | `POST /api/launch` | Create instance, seed workspace, start container |
+| **Stop** | `POST /api/stop` | Stop container, preserve all data |
+| **Restart** | `POST /api/launch` (same pubkey) | Start existing container, update name if changed |
+| **Destroy** | `POST /api/destroy` | Remove container, wipe instance directory |
 
-### Container Security
-
-Each instance runs with hardened defaults:
-
-| Setting | Value | Purpose |
-|---------|-------|---------|
-| `ReadonlyRootfs` | `true` | Immutable container filesystem |
-| `Tmpfs /tmp` | `64MB` | Writable scratch space only |
-| `CapDrop` | `ALL` | Drop all Linux capabilities |
-| `CapAdd` | `NET_BIND_SERVICE` | Only re-add port binding |
-| `SecurityOpt` | `no-new-privileges` | Block SUID/SGID escalation |
-| `Memory` | `512MB` (no swap) | Per-instance hard limit |
-| `CPU` | `0.5 cores` | Per-instance limit |
-| `RestartPolicy` | `unless-stopped` | Auto-restart on crash |
-| `Init` | `true` | Proper PID 1 signal handling |
-| `PortBinding` | Tailscale IP only | Not reachable from LAN |
-
-**Equivalent Docker run:**
-```bash
-docker run -d \
-  --name openclaw-[ID] \
-  --read-only --tmpfs /tmp:rw,size=64m \
-  --cap-drop ALL --cap-add NET_BIND_SERVICE \
-  --security-opt no-new-privileges \
-  --memory 512m --memory-swap 512m --cpus 0.5 \
-  --init --restart unless-stopped \
-  -p 100.x.x.x:[PORT]:18789 \
-  -v [CONFIG]:/home/node/.openclaw:rw \
-  -v [WORKSPACE]:/home/node/.openclaw/workspace:rw \
-  -e HOME=/home/node \
-  -e OPENCLAW_GATEWAY_TOKEN=[TOKEN] \
-  openclaw:local \
-  node dist/index.js gateway --bind lan --port 18789
-```
-
-### Health Reconciler
-
-A background process runs every 60 seconds:
-- Checks actual Docker container status for all instances
-- Updates an in-memory status cache (avoids Docker API calls on every request)
-- Detects state transitions (running → exited/dead)
-- Tracks restart counters per instance
-- Cleans up stale cache entries
-
-### WebSocket Log Streaming
-
-The `/api/logs/:id/stream` endpoint provides real-time log output:
-- Authenticates via `?token=` query parameter on upgrade
-- Tails last 50 lines immediately on connect
-- Follows new output in real-time
-- Cleans up Docker log stream on client disconnect
-- Frontend auto-falls back to HTTP polling if WebSocket fails
-
-### Prometheus Metrics
-
-`GET /metrics` returns standard Prometheus text format:
-
-```
-openclaw_instances_total 5
-openclaw_instances_running 3
-openclaw_instance_restarts_total{instance="60839bdbe7f2"} 0
-openclaw_instance_cpu_percent{instance="60839bdbe7f2"} 2.3400
-openclaw_instance_memory_bytes{instance="60839bdbe7f2"} 327680000
-```
-
-**Security:** Instance labels use ID only — no wallet addresses exposed.
+Destroying an instance wipes all data (`config/` and `workspace/`), ensuring clean state on redeploy.
 
 ---
 
 ## API Reference
 
-### Authentication
+All `/api/*` endpoints require `Authorization: Bearer <LAUNCHER_TOKEN>` header.
 
-All `/api/*` endpoints require authentication when `LAUNCHER_TOKEN` is set:
+| Method | Path | Description |
+|--------|------|-------------|
+| `GET` | `/api/instances` | List all instances (tokens excluded) |
+| `POST` | `/api/launch` | Deploy or restart instance |
+| `POST` | `/api/stop` | Stop instance |
+| `POST` | `/api/destroy` | Remove instance and wipe data |
+| `GET` | `/api/stats/:id` | Live CPU/memory stats |
+| `GET` | `/api/logs/:id` | Fetch recent logs |
+| `WS` | `/api/logs/:id/stream` | Stream logs via WebSocket |
+| `GET` | `/api/files/:id` | List workspace files |
+| `GET` | `/api/files/:id/:file` | Read workspace file |
+| `PUT` | `/api/files/:id/:file` | Edit workspace file |
+| `GET` | `/metrics` | Prometheus metrics |
+| `GET` | `/health` | Health check |
 
-```bash
-# Header auth (recommended)
-curl -H "Authorization: Bearer $TOKEN" http://localhost:8780/api/instances
+### Launch request body
 
-# Query param auth (for browser/UI)
-curl http://localhost:8780/api/instances?token=$TOKEN
-```
-
-Token comparison uses `crypto.timingSafeEqual` (constant-time, safe against timing attacks).
-
-### Endpoints
-
-| Method | Path | Auth | Description |
-|--------|------|------|-------------|
-| `GET` | `/` | No | Web UI dashboard |
-| `GET` | `/docs` | No | Rendered README documentation |
-| `GET` | `/health` | No | Health check |
-| `GET` | `/metrics` | No | Prometheus metrics |
-| `GET` | `/api/instances` | Yes | List all instances |
-| `POST` | `/api/launch` | Yes | Deploy or restart instance |
-| `POST` | `/api/stop` | Yes | Stop instance |
-| `POST` | `/api/destroy` | Yes | Remove instance |
-| `GET` | `/api/stats/:id` | Yes | Live CPU/memory stats |
-| `GET` | `/api/logs/:id` | Yes | Fetch recent logs (HTTP) |
-| `WS` | `/api/logs/:id/stream` | Yes | Stream logs (WebSocket) |
-| `GET` | `/api/files/:iid` | Yes | List workspace files |
-| `GET` | `/api/files/:iid/:file` | Yes | Read file |
-| `PUT` | `/api/files/:iid/:file` | Yes | Edit existing file |
-
-### Key Responses
-
-**Launch:**
 ```json
 {
-  "instance": {
-    "id": "60839bdbe7f2",
-    "pubkey": "aVuLr...",
-    "port": 19000,
-    "gateway_token": "abc123...",
-    "status": "starting"
-  }
-}
-```
-
-**List instances** (gateway_token is never included):
-```json
-{
-  "instances": [
-    { "id": "60839bdbe7f2", "pubkey": "aVuLr...", "port": 19000, "status": "running" }
-  ]
-}
-```
-
-**Stats:**
-```json
-{
-  "status": "running",
-  "stats": { "cpu": "2.34%", "mem": "312.5MiB / 512.0MiB", "mem_pct": "61.04%" }
+  "pubkey": "YOUR_WALLET_PUBLIC_KEY",
+  "name": "AgentName",
+  "telegram_bot_token": "optional-per-instance-token"
 }
 ```
 
 ---
 
-## Database
+## Customization
 
-**Location:** `data/instances.json`
+### Changing the personality
 
-Protected by file locking (`proper-lockfile`) for safe concurrent access. All write operations (launch, destroy) acquire an exclusive lock before read→modify→write.
+Edit `templates/workspace/SOUL.md`. Use `{{AGENT_NAME}}` wherever the agent's name should appear. Changes apply to newly deployed instances only — existing instances keep their files unless destroyed and redeployed.
 
-**Backup:**
-```bash
-cp data/instances.json data/instances.json.backup
-```
+### Adding models
+
+Edit the `ocConfig` object in `src/server.ts` to add providers and models. Add new models to both the `providers` section and the `agents.defaults.models` allowlist.
+
+### Adjusting resources
+
+Edit `src/docker.ts`:
+- `Memory` — container memory limit
+- `NanoCpus` — CPU allocation (500_000_000 = 0.5 cores)
+- `NODE_OPTIONS` env var — Node.js heap size
 
 ---
 
 ## Monitoring
 
-**Via web UI:** Dashboard shows status, CPU%, memory per instance. Auto-refreshes every 5 seconds.
-
-**Via CLI:**
-```bash
-docker stats --no-stream $(docker ps -f name=openclaw- -q)
-```
-
-**Via Prometheus:** Scrape `http://localhost:8780/metrics`
+- **Web UI:** Auto-refreshing dashboard with CPU/memory per instance
+- **CLI:** `docker stats --no-stream $(docker ps -f name=openclaw- -q)`
+- **Prometheus:** Scrape `http://localhost:8780/metrics`
 
 ---
 
 ## Troubleshooting
 
-### Instance won't start
-```bash
-docker ps -a -f name=openclaw-[ID]
-docker logs openclaw-[ID]
-```
+**Instance OOM:** OpenClaw v2026.3.8+ needs ~1.5 GB heap. Ensure containers have 2+ GB memory and `NODE_OPTIONS=--max-old-space-size=1536`.
 
-Common issues:
-- Port already in use → check `instances.json`, kill conflicting process
-- Out of memory → stop other instances
-- Image missing → build `openclaw:local`
+**Ollama timeout:** Check `sudo systemctl status ollama` and that containers can reach it via `http://172.17.0.1:<port>`.
 
-### "Maximum instances reached"
-Current limit: 20. Change `MAX_INSTANCES` in `src/server.ts`.
+**Model auto-discovery (700+ models):** Ensure API key env vars use non-standard names (`OC_ANTHROPIC_KEY`, not `ANTHROPIC_API_KEY`) inside containers.
 
-### Database issues
-```bash
-cp data/instances.json data/instances.json.broken
-echo '{"instances":{}}' > data/instances.json
-```
-Then redeploy instances via the UI.
-
----
-
-## Development
-
-```bash
-# Dev mode (auto-reload via tsx)
-npm run dev
-
-# Type check
-npx tsc --noEmit
-
-# Build
-npm run build
-
-# Test locally
-LAUNCHER_TOKEN=dev-secret npm run dev
-```
+**Port binding error:** Verify `TAILSCALE_IP` in `.env` matches an active interface on the host.
 
 ---
 
@@ -388,6 +289,4 @@ LAUNCHER_TOKEN=dev-secret npm run dev
 
 MIT
 
----
-
-**Built for X1 Validators by Jack Levin** 🎩
+**Built for X1 Validators by Jack Levin**
