@@ -340,8 +340,8 @@ app.post("/api/launch", async (req, res) => {
               "openrouter/openai/gpt-5.3-codex": {},
             },
             workspace: "/home/node/.openclaw/workspace",
-            bootstrapMaxChars: 30000,
-            bootstrapTotalMaxChars: 80000,
+            bootstrapMaxChars: 50000,
+            bootstrapTotalMaxChars: 150000,
             subagents: {
               maxConcurrent: 4,
               model: "anthropic/claude-sonnet-4-6",
