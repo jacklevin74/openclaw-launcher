@@ -410,6 +410,7 @@
   <div class="launch-panel">
     <h2>Deploy New Instance</h2>
     <div class="launch-row">
+      <input type="text" id="agent-name-input" placeholder="Agent name" maxlength="32" style="flex:0.7" />
       <input type="text" id="pubkey-input" placeholder="SVM wallet public key" maxlength="64" style="flex:2" />
       <input type="text" id="tg-token-input" placeholder="Telegram bot token (optional)" maxlength="128" style="flex:1" />
       <button class="btn btn-primary" id="launch-btn" onclick="launchInstance()">Deploy</button>
@@ -534,7 +535,7 @@ function cardHtml(inst) {
     <div class="instance-card" data-iid="${inst.id}">
       <div class="status-dot ${statusClass}"></div>
       <div class="instance-info">
-        <div class="wallet" title="${inst.pubkey}">${inst.pubkey}</div>
+        <div class="wallet" title="${inst.pubkey}">${inst.name ? `<span style="color:var(--accent2)">${inst.name}</span> · ` : ''}${inst.pubkey}</div>
         <div class="meta">
           <span><span class="label">ID:</span> ${inst.id}</span>
           <span><span class="label">Port:</span> ${inst.port}</span>
@@ -557,9 +558,11 @@ function cardHtml(inst) {
 }
 
 async function launchInstance() {
+  const nameInput = document.getElementById("agent-name-input");
   const input = document.getElementById("pubkey-input");
   const tgInput = document.getElementById("tg-token-input");
   const btn = document.getElementById("launch-btn");
+  const agentName = nameInput.value.trim();
   const pubkey = input.value.trim();
   const tgToken = tgInput.value.trim();
 
@@ -573,6 +576,7 @@ async function launchInstance() {
 
   try {
     const body = { pubkey };
+    if (agentName) body.name = agentName;
     if (tgToken) body.telegram_bot_token = tgToken;
     const res = await apiFetch(`${HOST}/api/launch`, {
       method: "POST",
@@ -583,6 +587,7 @@ async function launchInstance() {
       toast(data.error, "error");
     } else {
       toast(`Instance deployed on port ${data.instance.port}`);
+      nameInput.value = "";
       input.value = "";
       tgInput.value = "";
       fetchInstances();
@@ -849,6 +854,9 @@ fetchInstances();
 refreshInterval = setInterval(fetchInstances, 5000);
 
 // Enter key
+document.getElementById("agent-name-input").addEventListener("keydown", e => {
+  if (e.key === "Enter") launchInstance();
+});
 document.getElementById("pubkey-input").addEventListener("keydown", e => {
   if (e.key === "Enter") launchInstance();
 });

@@ -11,6 +11,7 @@ import lockfile from "proper-lockfile";
 
 export interface Instance {
   pubkey: string;
+  name?: string;
   port: number;
   gateway_token: string;
   telegram_bot_token?: string;

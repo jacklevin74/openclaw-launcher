@@ -8,7 +8,7 @@
 import express from "express";
 import { createServer } from "node:http";
 import { WebSocketServer, WebSocket } from "ws";
-import { readFileSync, existsSync, mkdirSync, readdirSync, writeFileSync, copyFileSync, chownSync } from "node:fs";
+import { readFileSync, existsSync, mkdirSync, readdirSync, writeFileSync, copyFileSync, chownSync, rmSync } from "node:fs";
 import { resolve, join } from "node:path";
 import { randomBytes } from "node:crypto";
 import { Marked } from "marked";
@@ -95,8 +95,9 @@ function dockerUnreachableError(): { error: string } {
 
 /**
  * Seed workspace from templates/workspace/ if it exists.
+ * Replaces {{AGENT_NAME}} placeholder in template files with the actual name.
  */
-function seedWorkspace(workspaceDir: string): void {
+function seedWorkspace(workspaceDir: string, agentName?: string): void {
   const tmplDir = resolve(BASE_DIR, "templates", "workspace");
   if (!existsSync(tmplDir)) return;
   try {
@@ -105,7 +106,13 @@ function seedWorkspace(workspaceDir: string): void {
       if (!entry.isFile()) continue;
       const dest = join(workspaceDir, entry.name);
       if (!existsSync(dest)) {
-        copyFileSync(join(tmplDir, entry.name), dest);
+        if (agentName && entry.name.endsWith(".md")) {
+          let content = readFileSync(join(tmplDir, entry.name), "utf-8");
+          content = content.replace(/\{\{AGENT_NAME\}\}/g, agentName);
+          writeFileSync(dest, content);
+        } else {
+          copyFileSync(join(tmplDir, entry.name), dest);
+        }
       }
     }
   } catch {
@@ -179,6 +186,7 @@ app.get("/api/instances", (_req, res) => {
 // Launch (or restart) an instance
 app.post("/api/launch", async (req, res) => {
   const pubkey = (req.body?.pubkey || "").trim();
+  const agentName = (req.body?.name || "").trim().slice(0, 32) || undefined;
   const telegramBotToken = (req.body?.telegram_bot_token || "").trim() || undefined;
 
   if (!pubkey || pubkey.length < 32 || pubkey.length > 64) {
@@ -211,7 +219,19 @@ app.post("/api/launch", async (req, res) => {
           };
         }
 
-        // Exists but stopped — restart it
+        // Exists but stopped — update name if changed, then restart
+        if (agentName && agentName !== existing.name) {
+          const oldName = existing.name || "Vero";
+          existing.name = agentName;
+          const wsDir = resolve(INSTANCES_DIR, iid, "workspace");
+          for (const f of ["SOUL.md", "MEMORY.md", "USER.md"]) {
+            const fp = join(wsDir, f);
+            if (existsSync(fp)) {
+              const content = readFileSync(fp, "utf-8").replace(new RegExp(oldName, "g"), agentName);
+              writeFileSync(fp, content);
+            }
+          }
+        }
         try {
           await startContainer(cname);
           // Wait a moment for container to start
@@ -258,7 +278,7 @@ app.post("/api/launch", async (req, res) => {
       chownSync(workspaceDir, CONTAINER_UID, CONTAINER_GID);
 
       // Seed workspace from templates
-      seedWorkspace(workspaceDir);
+      seedWorkspace(workspaceDir, agentName);
 
       // Write openclaw config with multi-model + Telegram
       const ocConfig: Record<string, any> = {
@@ -266,7 +286,7 @@ app.post("/api/launch", async (req, res) => {
           mode: "replace",
           providers: {
             ollama: {
-              baseUrl: "https://ai.puter.to/v1",
+              baseUrl: "http://172.17.0.1:11435/v1",
               auth: "api-key",
               apiKey: { source: "env", provider: "default", id: "OC_OLLAMA_KEY" },
               api: "openai-responses",
@@ -403,6 +423,7 @@ app.post("/api/launch", async (req, res) => {
 
         const instanceData: Instance = {
           pubkey,
+          name: agentName,
           port,
           gateway_token: gatewayToken,
           telegram_bot_token: telegramBotToken,
@@ -496,6 +517,14 @@ app.post("/api/destroy", async (req, res) => {
     });
   } catch (err) {
     console.error("DB error during destroy:", err);
+  }
+
+  // Wipe instance data directory for clean redeploy
+  const instanceDir = resolve(INSTANCES_DIR, iid);
+  try {
+    rmSync(instanceDir, { recursive: true, force: true });
+  } catch (err) {
+    console.error("Failed to remove instance dir:", err);
   }
 
   statusCache.delete(iid);

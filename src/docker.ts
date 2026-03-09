@@ -104,10 +104,11 @@ export async function launchContainer(params: LaunchParams): Promise<Dockerode.C
   const container = await docker.createContainer({
     Image: OPENCLAW_IMAGE,
     name: params.name,
-    Cmd: ["node", "dist/index.js", "gateway", "--bind", "lan", "--port", "18789"],
+    Cmd: ["openclaw", "gateway", "run"],
     Env: [
       `HOME=/home/node`,
       `TERM=xterm-256color`,
+      `NODE_OPTIONS=--max-old-space-size=1536`,
       `OPENCLAW_GATEWAY_TOKEN=${params.gatewayToken}`,
       // Use non-standard env var names to prevent openclaw auto-discovery of providers.
       // The explicit provider config references these via apiKey fields.
@@ -124,8 +125,8 @@ export async function launchContainer(params: LaunchParams): Promise<Dockerode.C
       CapDrop: ["ALL"],
       CapAdd: ["NET_BIND_SERVICE"],
       SecurityOpt: ["no-new-privileges"],
-      Memory: 512 * 1024 * 1024,
-      MemorySwap: 512 * 1024 * 1024,
+      Memory: 2 * 1024 * 1024 * 1024,
+      MemorySwap: 2 * 1024 * 1024 * 1024,
       NanoCpus: 500_000_000,
       RestartPolicy: { Name: "unless-stopped", MaximumRetryCount: 0 },
       Init: true,

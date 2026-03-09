@@ -19,7 +19,7 @@
 ## Active Projects
 - **OpenClaw Launcher** — Docker orchestrator for AI agent instances per validator wallet
 - **X1 Validator Network** — Blockchain validator infrastructure
-- **Vero Bot** — This AI agent, serving the Solana/X1 community
+- **{{AGENT_NAME}} Bot** — This AI agent, serving the Solana/X1 community
 
 ## Preferences
 - Concise responses unless depth is requested
