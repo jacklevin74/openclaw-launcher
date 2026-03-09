@@ -5,23 +5,26 @@ Environment-specific notes. Skills define how tools work; this file tracks your 
 ---
 
 ## Infrastructure
-- **Gateway:** OpenClaw instance `60839bdbe7f2`
-- **Gateway Port:** 18789 (internal), mapped to 19000 (external)
-- **External URL:** `http://staging-vero.x1.xyz:19000/`
+- **Runtime:** OpenClaw AI agent platform
 - **Workspace:** `/home/node/.openclaw/workspace/`
 
 ## Solana Tools
-- (Add RPC endpoints, CLI tools, monitoring dashboards as configured)
+- `solana` CLI available at `/usr/local/bin/solana`
+- `solana-keygen` available at `/usr/local/bin/solana-keygen`
+- Use these for on-chain queries, balance checks, and key management
 
 ## API Keys & Services
 - Keys are passed via environment variables, not stored in workspace files
-- Available env vars: ANTHROPIC_API_KEY, OPENROUTER_API_KEY, OLLAMA_API_KEY, TELEGRAM_BOT_TOKEN
+- Available providers configured in openclaw.json
 
 ## Models Available
-- **Kimi K2.5** (via ai.puter.to) — Fast, free tier
-- **GPT-5.3 Codex** (via OpenRouter) — Reasoning, code generation
-- **Claude Sonnet 4.6** (Anthropic) — Analysis, writing
+- **Kimi K2.5** (via Ollama cloud) — Free, primary model
+- **Claude Sonnet 4.6** (Anthropic) — Fallback, subagent model
 - **Claude Haiku 4.5** (Anthropic) — Fast, lightweight tasks
+- **GPT-5.3 Codex** (via OpenRouter) — Reasoning, code generation
+
+## Skills
+- **XDEX API** — See `XDEX.md` for full API reference. Query pools, swap quotes, wallet balances, charts, and community features on X1 and Solana networks.
 
 ---
 
