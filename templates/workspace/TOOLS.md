@@ -8,10 +8,14 @@ Environment-specific notes. Skills define how tools work; this file tracks your 
 - **Runtime:** OpenClaw AI agent platform
 - **Workspace:** `/home/node/.openclaw/workspace/`
 
-## Solana Tools
-- `solana` CLI available at `/usr/local/bin/solana`
-- `solana-keygen` available at `/usr/local/bin/solana-keygen`
-- Use these for on-chain queries, balance checks, and key management
+## Tachyon / X1 Tools
+- `tachyon-validator` — X1's validator client (replaces solana-validator)
+- `solana` CLI available at `/usr/local/bin/solana` — used for staking, transfers, account queries
+- `solana-keygen` available at `/usr/local/bin/solana-keygen` — keypair generation
+- X1 Mainnet RPC: `https://rpc.mainnet.x1.xyz`
+- X1 Testnet RPC: `https://rpc.testnet.x1.xyz`
+- Explorer: `https://explorer.x1.xyz/`
+- Validator monitor: `http://x1val.online/`
 
 ## API Keys & Services
 - Keys are passed via environment variables, not stored in workspace files
@@ -23,8 +27,9 @@ Environment-specific notes. Skills define how tools work; this file tracks your 
 - **Claude Haiku 4.5** (Anthropic) — Fast, lightweight tasks
 - **GPT-5.3 Codex** (via OpenRouter) — Reasoning, code generation
 
-## Skills
-- **XDEX API** — See `XDEX.md` for full API reference. Query pools, swap quotes, wallet balances, charts, and community features on X1 and Solana networks.
+## Knowledge Files
+- **X1.md** — X1 blockchain: architecture, Tachyon validator, staking, building, technical innovations
+- **XDEX.md** — XDEX DEX API: pools, swaps, quotes, wallets, charts, community endpoints
 
 ---
 
